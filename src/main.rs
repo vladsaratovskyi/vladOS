@@ -1,34 +1,35 @@
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
 
 use core::panic::PanicInfo;
 
-const VGA_BUFFER: *mut u8 = 0xb8000 as *mut u8;
-const COLOR_BYTE: u8 = 0x0f;
+mod gdt;
+mod interrupts;
+mod vga_buffer;
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    write_vga_message(b"Hello from Rust OS!");
+    println!("Hello from Rust OS!");
 
-    loop {
-        core::hint::spin_loop();
-    }
+    gdt::init();
+    interrupts::init_idt();
+
+    x86_64::instructions::interrupts::int3();
+
+    println!("Still alive after breakpoint");
+
+    hlt_loop();
 }
 
-fn write_vga_message(message: &[u8]) {
-    for (i, byte) in message.iter().enumerate() {
-        let offset = i * 2;
-
-        unsafe {
-            VGA_BUFFER.add(offset).write_volatile(*byte);
-            VGA_BUFFER.add(offset + 1).write_volatile(COLOR_BYTE);
-        }
+pub fn hlt_loop() -> ! {
+    loop {
+        x86_64::instructions::hlt();
     }
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+fn panic(info: &PanicInfo) -> ! {
+    println!("{}", info);
+    hlt_loop();
 }

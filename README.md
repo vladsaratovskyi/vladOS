@@ -3,6 +3,8 @@
 Minimal x86_64 bare-metal Rust kernel following the first milestones from
 Philipp Oppermann's Writing an OS in Rust.
 
+See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
+
 ## Current milestone
 
 - `#![no_std]`
