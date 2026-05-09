@@ -19,7 +19,9 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - IDT initialization
 - breakpoint exception handler
 - double-fault handler
+- page-fault handler
 - isolated QEMU integration test for the double-fault path
+- isolated QEMU integration test for the page-fault path
 - no heap, allocator, threads, or filesystem
 
 See [docs/cpu_setup_and_double_fault_test.md](docs/cpu_setup_and_double_fault_test.md)
@@ -78,12 +80,19 @@ Run the isolated double-fault QEMU test:
 cargo +nightly test --test stack_overflow
 ```
 
+Run the isolated page-fault QEMU test:
+
+```powershell
+cargo +nightly test --test page_fault
+```
+
 Expected serial output:
 
 ```text
 stack_overflow::stack_overflow...    [ok]
+page_fault::invalid_memory_access... [ok]
 ```
 
-The normal kernel boot does not intentionally double fault. The stack overflow
-test is a separate test kernel that exits QEMU successfully only from its
-double-fault handler.
+The normal kernel boot does not intentionally double fault or page fault. These
+are separate test kernels that exit QEMU successfully only from their exception
+handlers.

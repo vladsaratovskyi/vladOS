@@ -1,9 +1,9 @@
-# CPU Setup And Double-Fault Test
+# CPU Setup And Exception Tests
 
 This note documents the current early CPU setup milestone and the isolated QEMU
-test that proves the double-fault handler works. The kernel is still small and
-educational on purpose: no heap, no paging changes, no hardware IRQs, no PIC or
-APIC setup, and no scheduler.
+tests that prove the double-fault and page-fault handlers work. The kernel is
+still small and educational on purpose: no heap, no paging changes, no hardware
+IRQs, no PIC or APIC setup, and no scheduler.
 
 ## Normal Boot Path
 
@@ -94,6 +94,7 @@ It installs:
 
 - a breakpoint handler
 - a double-fault handler
+- a page-fault handler
 
 The breakpoint handler has this shape:
 
@@ -123,6 +124,32 @@ The production double-fault IDT entry uses:
 ```
 
 That connects the handler to the dedicated IST stack from the TSS.
+
+The page-fault handler has this shape:
+
+```rust
+extern "x86-interrupt" fn page_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: PageFaultErrorCode,
+)
+```
+
+When a page fault occurs, the CPU stores the faulting virtual address in `CR2`.
+The handler reads `Cr2::read()`, prints the accessed address, prints the raw
+`PageFaultErrorCode`, decodes the common bits into readable fields, prints the
+interrupt stack frame, and halts forever.
+
+The decoded fields are:
+
+- reason: page not present or protection violation
+- access: read or write
+- mode: supervisor or user
+- reserved bit violation: yes or no
+- instruction fetch: yes or no
+
+The handler does not return because this kernel has no frame allocator, demand
+paging, or recovery policy yet. Returning would just retry the same faulting
+instruction.
 
 ## Serial Output
 
@@ -163,12 +190,16 @@ For `0x10`, that is `0x21`, or decimal `33`.
 
 ## Bootimage Test Configuration
 
-`Cargo.toml` configures the stack-overflow integration test as a harness-free
-test kernel:
+`Cargo.toml` configures the exception integration tests as harness-free test
+kernels:
 
 ```toml
 [[test]]
 name = "stack_overflow"
+harness = false
+
+[[test]]
+name = "page_fault"
 harness = false
 ```
 
@@ -235,6 +266,29 @@ The test handler:
 
 It never returns because double faults are fatal in this kernel.
 
+## Page Fault Test
+
+The isolated page-fault test lives in `tests/page_fault.rs`.
+
+Its `_start()` does this:
+
+1. Initialize serial output.
+2. Print `page_fault::invalid_memory_access...\t`.
+3. Call `gdt::init()`.
+4. Load a test-local IDT with a page-fault handler.
+5. Read from `0x4444_4444_0000` with `core::ptr::read_volatile`.
+6. Panic if execution ever continues.
+
+The address is canonical on x86_64 but should be unmapped in this early kernel.
+The volatile read keeps the compiler from removing the intentionally faulting
+memory access.
+
+The test handler reads `CR2`, prints the accessed address, error code, and stack
+frame over serial, prints `[ok]`, exits QEMU with `QemuExitCode::Success`, and
+then enters `hlt_loop()`.
+
+This keeps the QEMU success path out of the production page-fault handler.
+
 ## Commands
 
 Check the kernel:
@@ -261,17 +315,24 @@ Run the double-fault integration test:
 cargo +nightly test --test stack_overflow
 ```
 
+Run the page-fault integration test:
+
+```powershell
+cargo +nightly test --test page_fault
+```
+
 Expected test output:
 
 ```text
 stack_overflow::stack_overflow...    [ok]
+page_fault::invalid_memory_access... [ok]
 ```
 
 ## Current Limitations
 
 - There is still no full custom test framework.
-- There is only one integration test kernel.
+- There are only focused exception integration test kernels.
 - Normal boot has no QEMU exit path, so `cargo run` keeps running until stopped.
 - Serial output is intentionally minimal and not interrupt-safe.
-- The double-fault test proves the handler and IST path, but it does not test
-  other CPU exceptions or hardware IRQs.
+- The page-fault handler reports faults but does not recover from them yet.
+- Hardware IRQs are not configured or tested yet.
