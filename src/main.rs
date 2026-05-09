@@ -1,12 +1,9 @@
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
 
 use core::panic::PanicInfo;
 
-mod gdt;
-mod interrupts;
-mod vga_buffer;
+use blog_os::{gdt, hlt_loop, interrupts, println};
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
@@ -20,12 +17,6 @@ pub extern "C" fn _start() -> ! {
     println!("Still alive after breakpoint");
 
     hlt_loop();
-}
-
-pub fn hlt_loop() -> ! {
-    loop {
-        x86_64::instructions::hlt();
-    }
 }
 
 #[panic_handler]
