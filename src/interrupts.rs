@@ -6,11 +6,13 @@ use x86_64::instructions::{interrupts as cpu_interrupts, port::Port};
 use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
+use crate::arch::x86_64::context;
 use crate::{gdt, hlt_loop, println};
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 pub const PIT_FREQUENCY_HZ: u32 = 100;
+pub const YIELD_VECTOR: u8 = PIC_2_OFFSET + 8;
 
 const PIT_BASE_FREQUENCY_HZ: u32 = 1_193_182;
 const PIT_COMMAND_PORT: u16 = 0x43;
@@ -29,6 +31,7 @@ static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     Keyboard = PIC_1_OFFSET + 1,
+    Yield = YIELD_VECTOR,
 }
 
 impl InterruptIndex {
@@ -53,7 +56,13 @@ pub fn init_idt() {
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
     }
 
-    idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
+    unsafe {
+        idt[InterruptIndex::Timer.as_usize()]
+            .set_handler_addr(context::timer_interrupt_entry_addr());
+        idt[InterruptIndex::Yield.as_usize()]
+            .set_handler_addr(context::yield_interrupt_entry_addr());
+    }
+
     idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
 
     idt.load();
@@ -188,13 +197,23 @@ fn yes_no(value: bool) -> &'static str {
     }
 }
 
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+#[no_mangle]
+pub extern "C" fn timer_interrupt_rust(frame_rsp: u64) -> u64 {
     TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+
+    let next_rsp = crate::scheduler::on_timer_interrupt(frame_rsp);
 
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
+
+    next_rsp
+}
+
+#[no_mangle]
+pub extern "C" fn yield_interrupt_rust(frame_rsp: u64) -> u64 {
+    crate::scheduler::on_yield_interrupt(frame_rsp)
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {

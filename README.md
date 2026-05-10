@@ -34,9 +34,11 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - interrupt-safe VGA and serial printing using short interrupt-disabled
   critical sections around spin-locked writers
 - stackful cooperative kernel tasks
+- PIT-driven preemptive kernel task switching
 - dedicated 8 KiB heap-backed kernel stack per task
-- round-robin cooperative scheduler with explicit `yield_now()`
-- x86_64 context switch that saves callee-saved registers and `rsp`
+- round-robin scheduler with explicit `yield_now()` and optional preemption
+- x86_64 trap-frame context switch that saves general-purpose registers and
+  returns through the interrupt-return path
 - one-page virtual mapping proof in an isolated QEMU integration test
 - isolated QEMU integration test for the double-fault path
 - isolated QEMU integration test for the page-fault path
@@ -44,7 +46,8 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - isolated QEMU integration test for heap allocation
 - isolated QEMU integration test for PIC/PIT interrupt setup
 - isolated QEMU integration test for cooperative task switching
-- no APIC, timer-driven preemption, heap growth, userspace, or filesystem
+- isolated QEMU integration test for PIT-driven preemptive task switching
+- no APIC, heap growth, userspace, or filesystem
 
 Documentation entry points:
 
@@ -108,7 +111,8 @@ programs the PIT, unmasks only timer and keyboard IRQs, then enables CPU
 interrupts. Timer interrupts increment an early tick counter; keyboard
 interrupts print raw scancodes. It then starts a short cooperative task demo
 where two stackful kernel tasks print progress and voluntarily yield to each
-other before the kernel enters `hlt_loop()`.
+other before the kernel enters `hlt_loop()`. Timer-driven preemption is
+available but remains opt-in; the normal boot path keeps the demo output quiet.
 
 ## Tests
 
@@ -148,6 +152,12 @@ Run the isolated cooperative-task QEMU test:
 cargo +nightly test --test cooperative_tasks
 ```
 
+Run the isolated preemptive-task QEMU test:
+
+```powershell
+cargo +nightly test --test preemptive_tasks
+```
+
 Expected serial output:
 
 ```text
@@ -157,6 +167,7 @@ memory_mapping::map_one_page...      [ok]
 heap_allocation::heap_allocations... [ok]
 interrupts::pic_pit_foundation...    [ok]
 cooperative_tasks::round_robin_yield... [ok]
+preemptive_tasks::timer_preemption...    [ok]
 ```
 
 The normal kernel boot does not intentionally double fault or page fault. These
@@ -177,6 +188,7 @@ cargo +nightly test --test memory_mapping
 cargo +nightly test --test heap_allocation
 cargo +nightly test --test interrupts
 cargo +nightly test --test cooperative_tasks
+cargo +nightly test --test preemptive_tasks
 ```
 
 `cargo +nightly run` boots the normal kernel in QEMU. It does not exit on its

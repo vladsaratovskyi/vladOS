@@ -10,6 +10,7 @@ const DOUBLE_FAULT_STACK_SIZE: usize = 4096 * 5;
 
 struct Selectors {
     code_selector: SegmentSelector,
+    data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
 
@@ -22,6 +23,7 @@ static mut TSS: TaskStateSegment = TaskStateSegment::new();
 static mut GDT: GlobalDescriptorTable = GlobalDescriptorTable::new();
 static mut SELECTORS: Selectors = Selectors {
     code_selector: SegmentSelector::new(0, PrivilegeLevel::Ring0),
+    data_selector: SegmentSelector::new(0, PrivilegeLevel::Ring0),
     tss_selector: SegmentSelector::new(0, PrivilegeLevel::Ring0),
 };
 
@@ -51,6 +53,7 @@ fn init_gdt() {
     // valid code segment and uses a TSS descriptor for IST stack switching.
     let gdt = unsafe { &mut *core::ptr::addr_of_mut!(GDT) };
     let code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
+    let data_selector = gdt.add_entry(Descriptor::kernel_data_segment());
     let tss_selector = gdt.add_entry(Descriptor::tss_segment(unsafe {
         &*core::ptr::addr_of!(TSS)
     }));
@@ -58,13 +61,14 @@ fn init_gdt() {
     unsafe {
         *core::ptr::addr_of_mut!(SELECTORS) = Selectors {
             code_selector,
+            data_selector,
             tss_selector,
         };
     }
 }
 
 fn load_gdt() {
-    use x86_64::instructions::segmentation::{Segment, CS};
+    use x86_64::instructions::segmentation::{Segment, CS, SS};
     use x86_64::instructions::tables::load_tss;
 
     let gdt = unsafe { &*core::ptr::addr_of!(GDT) };
@@ -74,6 +78,7 @@ fn load_gdt() {
 
     unsafe {
         CS::set_reg(selectors.code_selector);
+        SS::set_reg(selectors.data_selector);
         load_tss(selectors.tss_selector);
     }
 }

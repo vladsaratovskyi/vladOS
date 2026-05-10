@@ -26,10 +26,10 @@ pub struct Task {
 }
 
 impl Task {
-    pub fn new(id: TaskId, entry: TaskEntry) -> Self {
+    pub fn new(id: TaskId, entry: TaskEntry, rflags: u64) -> Self {
         let mut stack = vec![0u8; TASK_STACK_SIZE].into_boxed_slice();
         let context =
-            unsafe { Context::new_task(&mut stack, task_trampoline as *const () as usize) };
+            unsafe { Context::new_task(&mut stack, task_trampoline as *const () as usize, rflags) };
 
         Self {
             id,
@@ -60,8 +60,12 @@ impl Task {
         core::ptr::addr_of!(self.context)
     }
 
-    pub(crate) fn context_mut(&mut self) -> *mut Context {
-        core::ptr::addr_of_mut!(self.context)
+    pub(crate) fn saved_rsp(&self) -> u64 {
+        self.context.rsp()
+    }
+
+    pub(crate) fn set_saved_rsp(&mut self, rsp: u64) {
+        self.context.set_rsp(rsp);
     }
 }
 

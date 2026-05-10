@@ -15,6 +15,7 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 - page faults
 - timer IRQs
 - keyboard IRQs
+- the private software yield interrupt used by `scheduler::yield_now()`
 
 ## Dependencies
 
@@ -25,7 +26,8 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 - `x86_64::instructions::port::Port` for PIT and keyboard I/O ports
 - `Cr2` to read the virtual address that caused a page fault
 - `InterruptDescriptorTable` for IDT construction
-- `InterruptStackFrame` for saved CPU state passed to handlers
+- `InterruptStackFrame` for saved CPU state passed to simple Rust handlers
+- `crate::arch::x86_64::context` for the low-level timer and yield stubs
 - `PageFaultErrorCode` for CPU-supplied page-fault details
 - `crate::gdt` for the double-fault IST index
 - `crate::hlt_loop` for fatal handlers
@@ -34,7 +36,8 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 ## Invariants
 
 - The IDT must live at a stable address after `lidt`.
-- Exception and IRQ handlers must use `extern "x86-interrupt"`.
+- Simple exception and keyboard handlers use `extern "x86-interrupt"`.
+- The timer IRQ uses an explicit assembly stub because it may switch tasks.
 - The PICs must be remapped away from CPU exception vectors before CPU
   interrupts are enabled.
 - Only IRQ0 and IRQ1 are unmasked at this milestone.
@@ -57,15 +60,17 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 | `InterruptDescriptorTable` | The table that maps exception and interrupt vectors to handler functions. |
 | `InterruptStackFrame` | A snapshot of CPU state pushed for an exception: instruction pointer, code segment, flags, stack pointer, and stack segment. |
 | `PageFaultErrorCode` | A bitflag value pushed by the CPU for page faults. It explains the access type and cause. |
+| `use crate::arch::x86_64::context;` | Imports addresses for the explicit timer and yield interrupt entry stubs. |
 | `use crate::{gdt, hlt_loop, println};` | Imports local kernel helpers: GDT constants, halt loop, and VGA output. |
 | `pub const PIC_1_OFFSET: u8 = 32;` | Chooses vector 32 as the first hardware IRQ vector. CPU vectors `0..31` are reserved for exceptions, so remapping starts after them. |
 | `pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;` | Maps the secondary PIC directly after the primary PIC, giving vectors `40..47`. |
-| `pub const PIT_FREQUENCY_HZ: u32 = 100;` | Sets a simple 100 Hz timer rate for early kernel use. There is no timer-driven scheduler or sleep API yet. |
+| `pub const PIT_FREQUENCY_HZ: u32 = 100;` | Sets a simple 100 Hz timer rate for early ticks and the first preemptive scheduling quantum. There is still no sleep API or timekeeping abstraction. |
+| `pub const YIELD_VECTOR: u8 = PIC_2_OFFSET + 8;` | Reserves vector 48 for cooperative `yield_now()`. This is not a PIC IRQ; it is a private software interrupt. |
 | `PIT_COMMAND_PORT`, `PIT_CHANNEL_0_PORT`, and `KEYBOARD_DATA_PORT` | Name the I/O ports used for PIT setup and raw keyboard scancode reads. |
 | `static PICS: Mutex<ChainedPics> = ...;` | Stores the remapped PIC pair behind a lock so initialization and EOI notifications serialize access to PIC command ports. |
 | `static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);` | Global monotonic counter incremented by the timer IRQ handler. |
 | `static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();` | Stores the production IDT at a stable global address. It is mutated during boot and then loaded. |
-| `pub enum InterruptIndex { Timer = PIC_1_OFFSET, Keyboard = PIC_1_OFFSET + 1 }` | Gives names to the hardware interrupt vectors the kernel currently handles. Timer is IRQ0 and keyboard is IRQ1 after PIC remapping. |
+| `pub enum InterruptIndex { ... }` | Gives names to the interrupt vectors the kernel currently handles: timer IRQ0, keyboard IRQ1, and the private software yield vector. |
 | `as_u8()` and `as_usize()` | Convert the enum into the forms needed by PIC EOI calls and IDT indexing. |
 | `pub fn init_idt() {` | Public function called by normal boot to initialize exception handling. |
 | `let idt = unsafe { &mut *core::ptr::addr_of_mut!(IDT) };` | Gets a mutable reference to the static IDT through a raw pointer. |
@@ -74,7 +79,8 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 | `unsafe { idt.double_fault ... }` | Configures the vector 8 double-fault handler and its IST stack. `set_stack_index` is unsafe because the index must be valid in the loaded TSS. |
 | `.set_handler_fn(double_fault_handler)` | Sets the double-fault handler function. |
 | `.set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);` | Tells the CPU to switch to the dedicated IST stack before calling the double-fault handler. |
-| `idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);` | Installs the handler for IRQ0 after PIC remapping. |
+| `idt[InterruptIndex::Timer.as_usize()].set_handler_addr(...)` | Installs the explicit low-level IRQ0 entry stub. The timer path can switch tasks, so it cannot use a normal Rust `extern "x86-interrupt"` handler. |
+| `idt[InterruptIndex::Yield.as_usize()].set_handler_addr(...)` | Installs the low-level software-yield entry stub used by `scheduler::yield_now()`. |
 | `idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);` | Installs the handler for IRQ1 after PIC remapping. |
 | `idt.load();` | Executes `lidt` through the `x86_64` crate. After this, the CPU uses this IDT. |
 | `println!("IDT initialized");` | Prints confirmation after the IDT is active. |
@@ -86,7 +92,7 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 | `command_port.write(PIT_CHANNEL_0_SQUARE_WAVE);` | Selects channel 0, low-byte/high-byte access, square-wave mode, and binary counting. |
 | `channel_0.write(...)` twice | Sends the low byte and high byte of the divisor to PIT channel 0. |
 | `pub fn enable_interrupts()` | Enables external interrupts at the CPU after the IDT, PICs, PIT, and early kernel setup are ready. |
-| `pub fn timer_ticks() -> u64` | Exposes the current early tick count with relaxed atomic ordering. The counter is diagnostic and monotonic, not a scheduling clock. |
+| `pub fn timer_ticks() -> u64` | Exposes the current early tick count with relaxed atomic ordering. The preemptive scheduler uses timer delivery as a quantum source but does not expose sleeps or time accounting yet. |
 | `extern "x86-interrupt" fn breakpoint_handler(...)` | Defines a CPU exception handler with the interrupt ABI. |
 | `stack_frame: InterruptStackFrame` | Receives the CPU state saved at the breakpoint. |
 | `println!("EXCEPTION: BREAKPOINT");` | Labels the exception in VGA output. |
@@ -125,9 +131,11 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 | `USER_MODE` absent | Means the fault came from supervisor/kernel mode. |
 | `fn yes_no(value: bool) -> &'static str` | Small formatting helper for boolean page-fault details. |
 | `if value { "yes" } else { "no" }` | Converts a boolean into stable user-facing text. |
-| `extern "x86-interrupt" fn timer_interrupt_handler(...)` | Handles PIT IRQ0. The stack frame is accepted but unused because this handler only updates the tick counter. |
-| `TIMER_TICKS.fetch_add(1, Ordering::Relaxed);` | Increments the early global tick counter without allocating or locking. Relaxed ordering is enough because the value is only a simple counter at this stage. |
-| `notify_end_of_interrupt(InterruptIndex::Timer.as_u8())` | Sends EOI to the PIC so it can deliver another timer interrupt. |
+| `pub extern "C" fn timer_interrupt_rust(frame_rsp: u64) -> u64` | Rust half of the timer interrupt path. The assembly stub passes the saved trap-frame stack pointer and expects back the frame pointer to resume. |
+| `TIMER_TICKS.fetch_add(1, Ordering::Relaxed);` | Increments the early global tick counter without allocating or locking. |
+| `crate::scheduler::on_timer_interrupt(frame_rsp)` | Lets the scheduler save the interrupted task and optionally choose another ready task when preemption is enabled. |
+| `notify_end_of_interrupt(InterruptIndex::Timer.as_u8())` | Sends exactly one EOI to the PIC before the selected context is restored. |
+| `pub extern "C" fn yield_interrupt_rust(frame_rsp: u64) -> u64` | Rust half of the software-yield path. It shares the scheduler switch logic but does not send PIC EOI because no device IRQ occurred. |
 | `extern "x86-interrupt" fn keyboard_interrupt_handler(...)` | Handles keyboard IRQ1. |
 | `Port::new(KEYBOARD_DATA_PORT).read()` | Reads one raw scancode byte from port `0x60`. Reading the data port acknowledges the keyboard controller side of the interrupt. |
 | `println!("keyboard scancode: {:#04x}", scancode);` | Logs the raw scancode for this milestone. Full key decoding is intentionally deferred. |

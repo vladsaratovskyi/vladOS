@@ -28,6 +28,10 @@ pub extern "C" fn _start() -> ! {
         interrupts::InterruptIndex::Timer.as_usize(),
         usize::from(interrupts::PIC_1_OFFSET)
     );
+    assert_eq!(
+        interrupts::InterruptIndex::Yield.as_u8(),
+        interrupts::YIELD_VECTOR
+    );
     assert_eq!(interrupts::timer_ticks(), 0);
 
     serial_println!("[ok]");

@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -8,16 +7,13 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use bootloader::{entry_point, BootInfo};
 use vlad_os::memory::BootInfoFrameAllocator;
 use vlad_os::qemu::{exit_qemu, QemuExitCode};
-use vlad_os::{allocator, gdt, hlt_loop, memory, scheduler, serial_print, serial_println};
-use x86_64::{
-    registers::control::Cr2,
-    structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
-    VirtAddr,
+use vlad_os::{
+    allocator, gdt, hlt_loop, interrupts, memory, scheduler, serial_print, serial_println,
 };
+use x86_64::VirtAddr;
 
 static STEP: AtomicUsize = AtomicUsize::new(0);
 static COMPLETED_TASKS: AtomicUsize = AtomicUsize::new(0);
-static mut TEST_IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 
 entry_point!(test_kernel_main);
 
@@ -26,7 +22,7 @@ fn test_kernel_main(boot_info: &'static BootInfo) -> ! {
     serial_print!("cooperative_tasks::round_robin_yield...\t");
 
     gdt::init();
-    init_test_idt();
+    interrupts::init_idt();
 
     let physical_memory_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(physical_memory_offset) };
@@ -87,30 +83,6 @@ fn expect_step(expected: usize) {
         STEP.compare_exchange(expected, expected + 1, Ordering::SeqCst, Ordering::SeqCst),
         Ok(expected)
     );
-}
-
-fn init_test_idt() {
-    let idt = unsafe { &mut *core::ptr::addr_of_mut!(TEST_IDT) };
-
-    idt.page_fault.set_handler_fn(test_page_fault_handler);
-    idt.load();
-}
-
-extern "x86-interrupt" fn test_page_fault_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: PageFaultErrorCode,
-) {
-    let accessed_address = Cr2::read();
-
-    serial_println!();
-    serial_println!("EXCEPTION: PAGE FAULT");
-    serial_println!("Accessed Address: {:?}", accessed_address);
-    serial_println!("Error Code: {:?}", error_code);
-    serial_println!("Stack Frame: {:#?}", stack_frame);
-    serial_println!("[failed]");
-
-    exit_qemu(QemuExitCode::Failed);
-    hlt_loop();
 }
 
 #[panic_handler]

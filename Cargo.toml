@@ -48,6 +48,10 @@ harness = false
 name = "cooperative_tasks"
 harness = false
 
+[[test]]
+name = "preemptive_tasks"
+harness = false
+
 [profile.dev]
 panic = "abort"
 

@@ -19,7 +19,8 @@ Read order:
    `src/serial.rs`, and `src/qemu.rs`
 8. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
    `tests/memory_mapping.rs`, `tests/heap_allocation.rs`, and
-   `tests/interrupts.rs`, and `tests/cooperative_tasks.rs`
+   `tests/interrupts.rs`, `tests/cooperative_tasks.rs`, and
+   `tests/preemptive_tasks.rs`
 9. [build_config.md](build_config.md): `Cargo.toml`, `.cargo/config.toml`,
    `x86_64-vlad_os.json`, and `rust-toolchain.toml`
 

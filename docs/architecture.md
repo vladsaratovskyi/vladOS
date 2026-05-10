@@ -6,9 +6,9 @@ is meant to be read before the line-by-line walkthroughs in
 
 The project is an educational `x86_64` Rust kernel. It is deliberately small:
 there is now a fixed early heap, a legacy PIC/PIT interrupt foundation, and a
-stackful cooperative task foundation. The current goal is to make voluntary
-kernel task switching work without jumping ahead to timer-driven preemption,
-userspace, dynamic heap growth, or filesystems.
+stackful kernel task foundation with both cooperative and PIT-driven preemptive
+switching. The current goal is still narrow: kernel tasks only, without jumping
+ahead to userspace, dynamic heap growth, or filesystems.
 
 ## What Exists Today
 
@@ -38,15 +38,18 @@ The kernel currently has:
 - keyboard IRQ handling with raw scancode reads from port `0x60`
 - interrupt-safe VGA and serial output
 - stackful cooperative kernel tasks
+- PIT-driven preemptive kernel scheduling
 - dedicated 8 KiB heap-backed kernel stack per task
-- a small round-robin scheduler with explicit `yield_now()`
-- an x86_64 cooperative context switch routine
+- a small round-robin scheduler with explicit `yield_now()` and opt-in
+  preemption
+- an x86_64 full trap-frame context switch routine for interrupt-time switches
 - one isolated double-fault test kernel
 - one isolated page-fault test kernel
 - one isolated memory-mapping test kernel
 - one isolated heap-allocation test kernel
 - one isolated interrupt-foundation test kernel
 - one isolated cooperative-task test kernel
+- one isolated preemptive-task test kernel
 
 For line-by-line details, start with
 [kernel_entry.md](code_walkthrough/kernel_entry.md).
@@ -173,8 +176,8 @@ See [kernel_entry.md](code_walkthrough/kernel_entry.md).
 ## GDT, TSS, And IST
 
 The Global Descriptor Table still matters in long mode even though most classic
-segmentation is disabled. The CPU still needs a valid code segment, and it uses
-a TSS descriptor to find the Task State Segment.
+segmentation is disabled. The CPU still needs valid code and stack/data
+selectors, and it uses a TSS descriptor to find the Task State Segment.
 
 The Task State Segment is not used for old-style hardware task switching here.
 Instead, it provides an Interrupt Stack Table entry for double faults.
@@ -226,7 +229,8 @@ enabling interrupts:
 - primary PIC: IRQ0 through IRQ7 become vectors `32..39`
 - secondary PIC: IRQ8 through IRQ15 become vectors `40..47`
 
-The production IDT installs handlers for the two IRQs this milestone supports:
+The production IDT installs handlers for the two device IRQs this stage
+supports:
 
 - IRQ0 timer: vector 32
 - IRQ1 keyboard: vector 33
@@ -238,16 +242,16 @@ The interrupt flow is:
 
 1. A device asserts an IRQ line.
 2. The PIC maps that IRQ to the configured CPU vector.
-3. The CPU looks up that vector in the IDT and enters the `extern
-   "x86-interrupt"` handler.
+3. The CPU looks up that vector in the IDT and enters either a simple Rust
+   `extern "x86-interrupt"` handler or the explicit timer assembly stub.
 4. The handler does the small amount of work for that device.
 5. The handler sends End Of Interrupt to the PIC so another IRQ can be
    delivered.
 
 The PIT is programmed through ports `0x43` and `0x40` for a 100 Hz channel 0
-timer. The timer handler increments an `AtomicU64` tick counter and sends EOI.
-There is no timer-driven scheduler, sleeping API, or timekeeping abstraction
-yet.
+timer. The timer path increments an `AtomicU64` tick counter, optionally asks
+the scheduler to switch tasks when preemption is enabled, and sends EOI. There
+is still no sleeping API or timekeeping abstraction.
 
 The keyboard handler reads one raw scancode byte from I/O port `0x60`, prints it
 in hexadecimal, and sends EOI. It deliberately does not decode keymaps or build
@@ -255,10 +259,10 @@ input queues yet.
 
 See [exceptions.md](code_walkthrough/exceptions.md) for the handler code.
 
-## Cooperative Kernel Tasks
+## Kernel Tasks
 
-The task foundation is stackful and cooperative. A task is a kernel function
-plus scheduler metadata:
+The task foundation is stackful. A task is a kernel function plus scheduler
+metadata:
 
 - a `TaskId`
 - a `TaskState`: `Ready`, `Running`, or `Finished`
@@ -271,40 +275,48 @@ current heap is only 100 KiB and this milestone caps the initial task table at
 four tasks. It is enough for the current demo and QEMU test, but it is not a
 final stack-sizing policy.
 
-New task stacks are prepared so the first context switch restores zeroed
-callee-saved registers and returns into a task trampoline. The trampoline calls
-the current task entry function. When that function returns, the trampoline
-marks the task `Finished` and switches away; finished tasks are skipped and not
-resumed. Task stacks are retained for the lifetime of the scheduler, so the
-kernel does not free a stack while still executing on it.
+New task stacks are prepared with an interrupt-return frame that enters a task
+trampoline. The trampoline calls the current task entry function. When that
+function returns, the trampoline marks the task `Finished` and switches away;
+finished tasks are skipped and not resumed. Task stacks are retained for the
+lifetime of the scheduler, so the kernel does not free a stack while still
+executing on it.
 
-The cooperative context switch saves the x86_64 SysV callee-saved registers:
-
-- `rbp`
-- `rbx`
-- `r12`
-- `r13`
-- `r14`
-- `r15`
-- `rsp`
-
-The instruction pointer is restored through `ret`. Caller-saved registers are
-not preserved by the switch because `yield_now()` is an ordinary function-call
-boundary; Rust already treats caller-saved registers as clobberable across that
-call.
+The original cooperative context was enough only at a known function-call
+boundary. Timer preemption can interrupt arbitrary code, so the current task
+context stores a full trap frame: `rax`, `rbx`, `rcx`, `rdx`, `rbp`, `rdi`,
+`rsi`, `r8` through `r15`, plus the CPU-pushed return state `rip`, `cs`,
+`rflags`, `rsp`, and `ss`. The assembly restore path pops the general-purpose
+registers and returns through `iretq`.
 
 The `yield_now()` path is:
 
 1. The running task calls `scheduler::yield_now()`.
-2. The scheduler finds the next `Ready` task in round-robin order.
-3. The current task becomes `Ready`; the selected task becomes `Running`.
-4. The low-level context switch saves the old stack pointer and callee-saved
-   registers, loads the next task's stack pointer, restores its saved registers,
-   and returns into that task.
+2. `yield_now()` raises a private software interrupt vector.
+3. The low-level interrupt stub saves the same full trap frame used by timer
+   preemption.
+4. The scheduler finds the next `Ready` task in round-robin order.
+5. The current task becomes `Ready`; the selected task becomes `Running`.
+6. The restore path resumes the selected task through `iretq`.
 
-The PIT timer interrupt does not call the scheduler yet. This keeps the current
-milestone cooperative only, while the saved context and dedicated task stacks
-are shaped so a later preemptive timer path can reuse them.
+The preemptive timer path is gated. Timer ticks always increment the global
+counter and send PIC EOI, but the timer IRQ asks the scheduler for a new task
+only after task state exists and `scheduler::enable_preemption()` has been
+called. The first quantum is intentionally simple: one scheduler decision per
+PIT tick. Scheduler mutations run with local interrupts disabled, which is
+enough for this single-core kernel and avoids adding SMP or blocking locks.
+
+The timer scheduling flow is:
+
+1. PIT channel 0 asserts IRQ0.
+2. The remapped PIC delivers vector 32.
+3. The CPU enters the IDT entry and pushes `rip`, `cs`, `rflags`, `rsp`, and
+   `ss`.
+4. The low-level timer stub saves all general-purpose registers.
+5. Rust increments the tick counter, optionally records the interrupted task
+   frame, and chooses the next ready task.
+6. Rust sends the timer EOI exactly once.
+7. Assembly restores the selected trap frame and returns through `iretq`.
 
 See [tasks.md](code_walkthrough/tasks.md).
 
@@ -359,6 +371,7 @@ The tests are harness-free bootable kernels:
 - `tests/heap_allocation.rs`
 - `tests/interrupts.rs`
 - `tests/cooperative_tasks.rs`
+- `tests/preemptive_tasks.rs`
 
 They do not use Rust's normal test harness because this is a `no_std` kernel.
 Instead, each test file defines or generates its own `_start`.
@@ -378,7 +391,9 @@ checks the public interrupt indexes and initial tick counter without enabling
 external interrupts or waiting on timer delivery. The cooperative task test
 initializes the fixed heap, spawns two tasks, verifies deterministic explicit
 yield ordering, checks that task-local state survives context switches, and
-exits QEMU after both tasks finish.
+exits QEMU after both tasks finish. The preemptive task test enables PIT-driven
+preemption, runs two tasks that do not call `yield_now()` during the proof, and
+exits only after both task-local counters make progress and one task finishes.
 
 See [tests.md](code_walkthrough/tests.md) and
 [build_config.md](code_walkthrough/build_config.md).
@@ -396,6 +411,7 @@ cargo +nightly test --test memory_mapping
 cargo +nightly test --test heap_allocation
 cargo +nightly test --test interrupts
 cargo +nightly test --test cooperative_tasks
+cargo +nightly test --test preemptive_tasks
 ```
 
 Use this to boot the normal kernel:
@@ -410,12 +426,11 @@ there.
 ## Current Boundaries
 
 This documentation describes only the current CPU-exception, memory-foundation,
-legacy interrupt-foundation, and cooperative task-foundation milestones. The
+legacy interrupt-foundation, and kernel task-foundation milestones. The
 kernel still does not have:
 
 - heap growth or physical frame reclamation
 - APIC setup
-- timer-driven preemption
 - kernel stack guard pages
 - userspace
 - keyboard decoding or input queues

@@ -11,6 +11,7 @@ This page covers:
 - `tests/heap_allocation.rs`
 - `tests/interrupts.rs`
 - `tests/cooperative_tasks.rs`
+- `tests/preemptive_tasks.rs`
 
 These tests are full bootable kernels. They do not use Rust's normal test
 harness. Each file defines or generates its own `_start`, installs only the
@@ -288,14 +289,13 @@ finish without being resumed.
 | --- | --- |
 | `#![no_std]` | The test kernel cannot use the Rust standard library. |
 | `#![no_main]` | The bootloader enters through this test's generated `_start`. |
-| `#![feature(abi_x86_interrupt)]` | Enables the interrupt ABI for the test-local page-fault handler. |
 | `static STEP: AtomicUsize = AtomicUsize::new(0);` | Shared deterministic schedule counter. Each task advances it only when it runs at the expected point. |
 | `static COMPLETED_TASKS: AtomicUsize = AtomicUsize::new(0);` | Counts task entries that reached their normal return path. |
 | `entry_point!(test_kernel_main);` | Generates the boot entry point and passes `BootInfo` to the test. |
 | `vlad_os::serial::init();` | Configures COM1 before printing test output. |
 | `serial_print!("cooperative_tasks::round_robin_yield...\t");` | Prints the test name without a newline so `[ok]` appears beside it. |
-| `gdt::init();` | Initializes the GDT/TSS before loading the test-local IDT. |
-| `init_test_idt();` | Installs a page-fault handler that reports failure if stack setup or switching faults. |
+| `gdt::init();` | Initializes the GDT/TSS before loading the production IDT. |
+| `interrupts::init_idt();` | Installs the production IDT, including the software yield vector used by `scheduler::yield_now()`. |
 | `memory::init(...)` and `BootInfoFrameAllocator::init(...)` | Reuses the normal page-table and frame allocator setup. |
 | `allocator::init_heap(...)` | Maps the fixed heap before task stack allocation. |
 | `scheduler::spawn(task_a)` and `scheduler::spawn(task_b)` | Creates two tasks with dedicated kernel stacks. |
@@ -307,6 +307,41 @@ finish without being resumed.
 | `task_a()` | Uses a local variable, yields twice, and checks that the local value survived each context switch. |
 | `task_b()` | Mirrors task A with a different local value and complementary schedule steps. |
 | `expect_step(expected)` | Uses atomic compare-exchange so a wrong task order fails immediately. |
-| `test_page_fault_handler(...)` | Reports unexpected page faults through serial and exits QEMU with failure. |
 | `#[panic_handler]` | Defines panic behavior for this test kernel. |
 | `vlad_os::qemu::test_panic_handler(info);` | Reports failed assertions through serial and QEMU debug-exit. |
+
+## `tests/preemptive_tasks.rs`
+
+### Purpose
+
+This test proves that PIT timer interrupts can preempt a running kernel task.
+The two task functions do not call `yield_now()` during the proof; success
+requires both task-local counters to make progress and one task to finish.
+
+### Invariants
+
+- The production IDT, PIC, and PIT setup must be used.
+- CPU interrupts are enabled before spawning tasks so their initial frames have
+  IF set.
+- Preemption is explicitly enabled only after both tasks are spawned.
+- The success path is based on counters and task completion, not a fixed delay.
+- Bounded tick and local-loop guards fail the test instead of hanging forever.
+
+### Line-By-Line
+
+| Code | Explanation |
+| --- | --- |
+| `static A_PROGRESS` and `static B_PROGRESS` | Atomically publish each task's local progress so the other task can observe it. |
+| `static A_DONE` | Records that task A returned through the scheduler finish path. |
+| `PROGRESS_TARGET` | Minimum per-task local counter value required for success. |
+| `TICK_TIMEOUT` and `LOCAL_STALL_LIMIT` | Deterministic failure guards for a broken preemptive path. |
+| `gdt::init(); interrupts::init_idt(); interrupts::init_pics(); interrupts::init_pit();` | Builds the real CPU and legacy IRQ path used by timer preemption. |
+| `allocator::init_heap(...)` | Maps the fixed heap before task stack allocation. |
+| `interrupts::enable_interrupts();` | Enables CPU interrupt delivery after IDT, PIC, PIT, and heap setup are complete. |
+| `scheduler::spawn(task_a)` and `scheduler::spawn(task_b)` | Creates two stackful kernel tasks. |
+| `scheduler::enable_preemption();` | Opens the timer-driven scheduling gate after valid task state exists. |
+| `scheduler::run();` | Starts the scheduler. The test expects QEMU success before this returns. |
+| `task_a()` | Busy-loops with a local counter, publishes progress, and returns only after task B has also progressed. |
+| `task_b()` | Busy-loops with its own local counter and exits QEMU successfully only after task A finished and both counters reached the target. |
+| no `scheduler::yield_now()` calls | Ensures success depends on timer preemption, not cooperative switching. |
+| `#[panic_handler]` | Reports assertion failures through serial and QEMU debug-exit. |

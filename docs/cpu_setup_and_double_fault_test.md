@@ -8,8 +8,8 @@
 This note documents the earlier CPU setup milestone and the isolated QEMU tests
 that prove the double-fault and page-fault handlers work. The current kernel has
 since added paging, a fixed early heap, legacy PIC/PIT interrupts, and a
-cooperative task foundation, but it is still small and educational on purpose:
-no APIC setup, no timer-driven preemption, and no userspace.
+stackful task foundation with optional PIT-driven preemption, but it is still
+small and educational on purpose: no APIC setup and no userspace.
 
 ## Normal Boot Path
 
@@ -45,7 +45,7 @@ It exposes:
 - `interrupts`: production IDT, CPU exception handlers, and legacy IRQ setup.
 - `memory`: active page-table access and boot-info frame allocation.
 - `allocator`: fixed heap mapping and global allocator setup.
-- `task` and `scheduler`: stackful cooperative kernel tasks.
+- `task` and `scheduler`: stackful kernel tasks and round-robin scheduling.
 - `arch`: architecture-specific context switch code.
 - `vga_buffer`: VGA `print!` and `println!` macros.
 - `serial`: COM1 serial output used by QEMU tests.
@@ -60,17 +60,18 @@ and keeps the boot sequence easy to read.
 The GDT setup lives in `src/gdt.rs`.
 
 Even in x86_64 long mode, where most segmentation is disabled, the CPU still
-needs a valid code segment and a TSS descriptor. The kernel creates:
+needs valid code/data selectors and a TSS descriptor. The kernel creates:
 
 - a kernel code segment descriptor
+- a kernel data/stack segment descriptor
 - a TSS descriptor
-- selectors for both descriptors
+- selectors for these descriptors
 
 `gdt::init()` performs three main operations:
 
 1. Fill the TSS interrupt stack table.
 2. Build the GDT entries.
-3. Load the GDT, set `CS`, and load the TSS selector.
+3. Load the GDT, set `CS` and `SS`, and load the TSS selector.
 
 The TSS is not used for old-style hardware task switching. In this kernel, its
 important job is providing an Interrupt Stack Table entry for double faults.

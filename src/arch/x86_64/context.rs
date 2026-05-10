@@ -1,9 +1,39 @@
 use core::arch::global_asm;
 
+use x86_64::instructions::segmentation::{Segment, CS, SS};
+use x86_64::VirtAddr;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Context {
     rsp: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct TrapFrame {
+    // Pushed by `timer_interrupt_entry` and `yield_interrupt_entry`.
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rbx: u64,
+    pub rax: u64,
+    // Pushed by the CPU on interrupt entry and consumed by `iretq`.
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
 }
 
 impl Context {
@@ -11,40 +41,62 @@ impl Context {
         Self { rsp: 0 }
     }
 
-    pub unsafe fn new_task(stack: &mut [u8], entry_point: usize) -> Self {
+    pub unsafe fn new_task(stack: &mut [u8], entry_point: usize, rflags: u64) -> Self {
         const STACK_ALIGN: usize = 16;
-        const INITIAL_FRAME_SIZE: usize = 8 * core::mem::size_of::<u64>();
 
         let stack_top = stack.as_mut_ptr() as usize + stack.len();
         let stack_top = stack_top & !(STACK_ALIGN - 1);
-        let frame_bottom = stack_top - INITIAL_FRAME_SIZE;
-        let frame = frame_bottom as *mut u64;
+        let initial_rsp = stack_top - core::mem::size_of::<u64>();
+        let frame_bottom = initial_rsp - core::mem::size_of::<TrapFrame>();
+        let frame = frame_bottom as *mut TrapFrame;
 
-        // The switch routine restores r15, r14, r13, r12, rbx, and rbp, then
-        // returns into entry_point. The last slot is padding so entry starts
-        // with the SysV ABI stack alignment: rsp % 16 == 8.
+        // New tasks start through the same interrupt-return restore path used
+        // after preemption. `initial_rsp` leaves the trampoline with
+        // `rsp % 16 == 8`, matching normal SysV function entry.
         unsafe {
-            frame.add(0).write(0);
-            frame.add(1).write(0);
-            frame.add(2).write(0);
-            frame.add(3).write(0);
-            frame.add(4).write(0);
-            frame.add(5).write(0);
-            frame.add(6).write(entry_point as u64);
-            frame.add(7).write(0);
+            frame.write(TrapFrame {
+                r15: 0,
+                r14: 0,
+                r13: 0,
+                r12: 0,
+                r11: 0,
+                r10: 0,
+                r9: 0,
+                r8: 0,
+                rsi: 0,
+                rdi: 0,
+                rbp: 0,
+                rdx: 0,
+                rcx: 0,
+                rbx: 0,
+                rax: 0,
+                rip: entry_point as u64,
+                cs: CS::get_reg().0 as u64,
+                rflags: rflags | 0x2,
+                rsp: initial_rsp as u64,
+                ss: SS::get_reg().0 as u64,
+            });
         }
 
         Self {
             rsp: frame_bottom as u64,
         }
     }
+
+    pub fn rsp(&self) -> u64 {
+        self.rsp
+    }
+
+    pub fn set_rsp(&mut self, rsp: u64) {
+        self.rsp = rsp;
+    }
 }
 
 global_asm!(
     r#"
-    .global context_switch
-    .type context_switch, @function
-context_switch:
+    .global switch_from_main_to_task
+    .type switch_from_main_to_task, @function
+switch_from_main_to_task:
     push rbp
     push rbx
     push r12
@@ -55,6 +107,20 @@ context_switch:
     mov [rdi], rsp
     mov rsp, [rsi]
 
+    jmp restore_interrupt_context
+    .size switch_from_main_to_task, . - switch_from_main_to_task
+
+    .global restore_task_context
+    .type restore_task_context, @function
+restore_task_context:
+    mov rsp, [rdi]
+    jmp restore_interrupt_context
+    .size restore_task_context, . - restore_task_context
+
+    .global restore_main_context
+    .type restore_main_context, @function
+restore_main_context:
+    mov rsp, [rdi]
     pop r15
     pop r14
     pop r13
@@ -62,16 +128,118 @@ context_switch:
     pop rbx
     pop rbp
     ret
-    .size context_switch, . - context_switch
+    .size restore_main_context, . - restore_main_context
+
+    .global timer_interrupt_entry
+    .type timer_interrupt_entry, @function
+timer_interrupt_entry:
+    // The CPU has already pushed rip, cs, rflags, rsp, and ss. Save all
+    // general-purpose registers because timer preemption can happen between
+    // any two instructions, not only at a function-call boundary.
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rbp
+    push rdi
+    push rsi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cld
+    // Pass the trap-frame stack pointer to Rust. The temporary stack
+    // alignment is only for the C ABI call; Rust returns the frame pointer
+    // that should be resumed.
+    mov rdi, rsp
+    mov rbp, rsp
+    and rsp, -16
+    call timer_interrupt_rust
+    mov rsp, rax
+    jmp restore_interrupt_context
+    .size timer_interrupt_entry, . - timer_interrupt_entry
+
+    .global yield_interrupt_entry
+    .type yield_interrupt_entry, @function
+yield_interrupt_entry:
+    // `yield_now()` uses a software interrupt so it shares the exact same
+    // full-context save/restore path as timer preemption.
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rbp
+    push rdi
+    push rsi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cld
+    mov rdi, rsp
+    mov rbp, rsp
+    and rsp, -16
+    call yield_interrupt_rust
+    mov rsp, rax
+    jmp restore_interrupt_context
+    .size yield_interrupt_entry, . - yield_interrupt_entry
+
+restore_interrupt_context:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rsi
+    pop rdi
+    pop rbp
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    iretq
 "#
 );
 
 extern "C" {
-    fn context_switch(old_context: *mut Context, new_context: *const Context);
+    fn switch_from_main_to_task(old_context: *mut Context, new_context: *const Context);
+    fn restore_task_context(new_context: *const Context) -> !;
+    fn restore_main_context(main_context: *const Context) -> !;
+    fn timer_interrupt_entry();
+    fn yield_interrupt_entry();
 }
 
-pub unsafe fn switch(old_context: *mut Context, new_context: *const Context) {
+pub unsafe fn switch_from_main(old_context: *mut Context, new_context: *const Context) {
     unsafe {
-        context_switch(old_context, new_context);
+        switch_from_main_to_task(old_context, new_context);
     }
+}
+
+pub unsafe fn restore_task(new_context: *const Context) -> ! {
+    unsafe { restore_task_context(new_context) }
+}
+
+pub unsafe fn restore_main(main_context: *const Context) -> ! {
+    unsafe { restore_main_context(main_context) }
+}
+
+pub fn timer_interrupt_entry_addr() -> VirtAddr {
+    VirtAddr::new(timer_interrupt_entry as *const () as u64)
+}
+
+pub fn yield_interrupt_entry_addr() -> VirtAddr {
+    VirtAddr::new(yield_interrupt_entry as *const () as u64)
 }

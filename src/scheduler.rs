@@ -1,4 +1,8 @@
 use alloc::vec::Vec;
+use core::arch::asm;
+
+use x86_64::instructions::interrupts as cpu_interrupts;
+use x86_64::registers::rflags;
 
 use crate::arch::x86_64::context::{self, Context};
 use crate::task::{Task, TaskEntry, TaskId, TaskState, MAX_TASKS};
@@ -15,6 +19,7 @@ struct Scheduler {
     tasks: Vec<Task>,
     current: Option<usize>,
     main_context: Context,
+    preemption_enabled: bool,
 }
 
 impl Scheduler {
@@ -23,16 +28,17 @@ impl Scheduler {
             tasks: Vec::new(),
             current: None,
             main_context: Context::empty(),
+            preemption_enabled: false,
         }
     }
 
-    fn spawn(&mut self, entry: TaskEntry) -> Result<TaskId, SpawnError> {
+    fn spawn(&mut self, entry: TaskEntry, initial_rflags: u64) -> Result<TaskId, SpawnError> {
         if self.tasks.len() >= MAX_TASKS {
             return Err(SpawnError::Full);
         }
 
         let id = TaskId(self.tasks.len());
-        self.tasks.push(Task::new(id, entry));
+        self.tasks.push(Task::new(id, entry, initial_rflags));
 
         Ok(id)
     }
@@ -69,14 +75,47 @@ impl Scheduler {
     fn all_tasks_finished(&self) -> bool {
         !self.tasks.is_empty() && self.finished_count() == self.tasks.len()
     }
+
+    fn save_current_frame(&mut self, frame_rsp: u64) -> Option<usize> {
+        let current = self.current?;
+
+        if self.tasks[current].state() == TaskState::Running {
+            self.tasks[current].set_saved_rsp(frame_rsp);
+            Some(current)
+        } else {
+            None
+        }
+    }
+
+    fn switch_from_interrupt(&mut self, frame_rsp: u64) -> u64 {
+        let Some(current) = self.save_current_frame(frame_rsp) else {
+            return frame_rsp;
+        };
+
+        let Some(next) = self.next_ready_after(current) else {
+            return frame_rsp;
+        };
+
+        self.tasks[current].set_state(TaskState::Ready);
+        self.tasks[next].set_state(TaskState::Running);
+        self.current = Some(next);
+
+        self.tasks[next].saved_rsp()
+    }
 }
 
 pub fn spawn(entry: TaskEntry) -> Result<TaskId, SpawnError> {
-    unsafe { scheduler_mut().spawn(entry) }
+    let initial_rflags = if rflags::read().contains(rflags::RFlags::INTERRUPT_FLAG) {
+        0x202
+    } else {
+        0x2
+    };
+
+    cpu_interrupts::without_interrupts(|| unsafe { scheduler_mut().spawn(entry, initial_rflags) })
 }
 
 pub fn run() {
-    unsafe {
+    cpu_interrupts::without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
         let Some(next) = scheduler.first_ready() else {
             return;
@@ -88,51 +127,70 @@ pub fn run() {
         let old_context = core::ptr::addr_of_mut!(scheduler.main_context);
         let new_context = scheduler.tasks[next].context();
 
-        context::switch(old_context, new_context);
-    }
+        context::switch_from_main(old_context, new_context);
+    });
 }
 
 pub fn yield_now() {
     unsafe {
-        let scheduler = scheduler_mut();
-        let Some(current) = scheduler.current else {
-            return;
-        };
-
-        let Some(next) = scheduler.next_ready_after(current) else {
-            return;
-        };
-
-        scheduler.tasks[current].set_state(TaskState::Ready);
-        scheduler.tasks[next].set_state(TaskState::Running);
-        scheduler.current = Some(next);
-
-        switch_between_tasks(scheduler, current, next);
+        asm!("int {vector}", vector = const crate::interrupts::YIELD_VECTOR);
     }
 }
 
+pub fn enable_preemption() {
+    cpu_interrupts::without_interrupts(|| unsafe {
+        scheduler_mut().preemption_enabled = true;
+    });
+}
+
+pub fn disable_preemption() {
+    cpu_interrupts::without_interrupts(|| unsafe {
+        scheduler_mut().preemption_enabled = false;
+    });
+}
+
+pub fn preemption_enabled() -> bool {
+    cpu_interrupts::without_interrupts(|| unsafe { scheduler_mut().preemption_enabled })
+}
+
 pub fn finished_task_count() -> usize {
-    unsafe { scheduler_mut().finished_count() }
+    cpu_interrupts::without_interrupts(|| unsafe { scheduler_mut().finished_count() })
 }
 
 pub fn all_tasks_finished() -> bool {
-    unsafe { scheduler_mut().all_tasks_finished() }
+    cpu_interrupts::without_interrupts(|| unsafe { scheduler_mut().all_tasks_finished() })
 }
 
 pub(crate) fn run_current_task() -> ! {
-    let entry = unsafe {
+    let entry = cpu_interrupts::without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
         let current = scheduler.current.expect("no current task");
 
         scheduler.tasks[current].entry()
-    };
+    });
 
     entry();
     finish_current_task();
 }
 
-fn finish_current_task() -> ! {
+pub(crate) fn on_timer_interrupt(frame_rsp: u64) -> u64 {
     unsafe {
+        let scheduler = scheduler_mut();
+
+        if scheduler.preemption_enabled && scheduler.current.is_some() {
+            scheduler.switch_from_interrupt(frame_rsp)
+        } else {
+            frame_rsp
+        }
+    }
+}
+
+pub(crate) fn on_yield_interrupt(frame_rsp: u64) -> u64 {
+    unsafe { scheduler_mut().switch_from_interrupt(frame_rsp) }
+}
+
+fn finish_current_task() -> ! {
+    cpu_interrupts::without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
         let current = scheduler.current.expect("no current task");
 
@@ -142,28 +200,18 @@ fn finish_current_task() -> ! {
             scheduler.tasks[next].set_state(TaskState::Running);
             scheduler.current = Some(next);
 
-            switch_between_tasks(scheduler, current, next);
+            let new_context = scheduler.tasks[next].context();
+            context::restore_task(new_context);
         } else {
             scheduler.current = None;
 
-            let old_context = scheduler.tasks[current].context_mut();
-            let new_context = core::ptr::addr_of!(scheduler.main_context);
-
-            context::switch(old_context, new_context);
+            let main_context = core::ptr::addr_of!(scheduler.main_context);
+            context::restore_main(main_context);
         }
-    }
+    });
 
     println!("task returned after finish");
     hlt_loop();
-}
-
-unsafe fn switch_between_tasks(scheduler: &mut Scheduler, current: usize, next: usize) {
-    let old_context = scheduler.tasks[current].context_mut();
-    let new_context = scheduler.tasks[next].context();
-
-    unsafe {
-        context::switch(old_context, new_context);
-    }
 }
 
 unsafe fn scheduler_mut() -> &'static mut Scheduler {

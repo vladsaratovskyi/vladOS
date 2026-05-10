@@ -55,6 +55,8 @@ binary target, integration test kernels, and panic strategy.
 | `harness = false` | Makes the interrupt test a bootable kernel that exits QEMU after checking PIC/PIT setup state. |
 | `[[test]] name = "cooperative_tasks"` | Declares the cooperative task integration test target. |
 | `harness = false` | Makes the task test a bootable kernel that exits QEMU after deterministic task switching checks. |
+| `[[test]] name = "preemptive_tasks"` | Declares the preemptive task integration test target. |
+| `harness = false` | Makes the preemptive task test a bootable kernel that exits QEMU after PIT-driven switching checks. |
 | `[profile.dev] panic = "abort"` | Development builds abort on panic. There is no stack unwinding runtime. |
 | `[profile.release] panic = "abort"` | Release builds also abort on panic. |
 
