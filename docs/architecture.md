@@ -5,10 +5,10 @@ is meant to be read before the line-by-line walkthroughs in
 [code_walkthrough/](code_walkthrough/README.md).
 
 The project is an educational `x86_64` Rust kernel. It is deliberately small:
-there is now only a fixed early heap, with no PIC/APIC setup, no hardware IRQs,
-no userspace, and no scheduler yet. The current goal is to finish the first
-memory-management foundation without jumping ahead to dynamic memory growth,
-multitasking, or userspace.
+there is now a fixed early heap, a legacy PIC/PIT interrupt foundation, and a
+stackful cooperative task foundation. The current goal is to make voluntary
+kernel task switching work without jumping ahead to timer-driven preemption,
+userspace, dynamic heap growth, or filesystems.
 
 ## What Exists Today
 
@@ -32,10 +32,21 @@ The kernel currently has:
 - a fixed-size kernel heap at virtual address `0x5555_5555_0000`
 - a global allocator backed by `linked_list_allocator`
 - `alloc` crate support for kernel `Box` and `Vec`
+- legacy 8259 PIC remapping for hardware IRQs
+- PIT channel 0 timer interrupts at 100 Hz
+- an atomic early timer tick counter
+- keyboard IRQ handling with raw scancode reads from port `0x60`
+- interrupt-safe VGA and serial output
+- stackful cooperative kernel tasks
+- dedicated 8 KiB heap-backed kernel stack per task
+- a small round-robin scheduler with explicit `yield_now()`
+- an x86_64 cooperative context switch routine
 - one isolated double-fault test kernel
 - one isolated page-fault test kernel
 - one isolated memory-mapping test kernel
 - one isolated heap-allocation test kernel
+- one isolated interrupt-foundation test kernel
+- one isolated cooperative-task test kernel
 
 For line-by-line details, start with
 [kernel_entry.md](code_walkthrough/kernel_entry.md).
@@ -74,18 +85,26 @@ Normal boot follows this sequence:
 3. `gdt::init()` configures the TSS, builds and loads the GDT, sets `CS`, and
    loads the TSS selector.
 4. `_start` calls `interrupts::init_idt()`.
-5. `interrupts::init_idt()` installs exception handlers into the IDT and loads
-   it with `lidt`.
-6. `_start` reads `boot_info.physical_memory_offset` and creates an
+5. `interrupts::init_idt()` installs exception and hardware IRQ handlers into
+   the IDT and loads it with `lidt`.
+6. `_start` calls `interrupts::init_pics()` to remap the legacy PICs and
+   unmask only timer and keyboard IRQs.
+7. `_start` calls `interrupts::init_pit()` to program PIT channel 0.
+8. `_start` reads `boot_info.physical_memory_offset` and creates an
    `OffsetPageTable` for the active page-table hierarchy.
-7. `_start` prints compact memory diagnostics: the physical-memory offset,
+9. `_start` prints compact memory diagnostics: the physical-memory offset,
    selected virtual-to-physical translations, and the usable region count.
-8. `_start` creates the boot-info frame allocator, maps the fixed heap pages,
+10. `_start` creates the boot-info frame allocator, maps the fixed heap pages,
    initializes the global allocator, and prints `Heap initialized`.
-9. `_start` executes `int3`, intentionally raising a breakpoint exception.
-10. The breakpoint handler prints the interrupt stack frame and returns.
-11. `_start` prints `Still alive after breakpoint`.
-12. `_start` enters `hlt_loop()` forever.
+11. `_start` enables CPU interrupts.
+12. `_start` executes `int3`, intentionally raising a breakpoint exception.
+13. The breakpoint handler prints the interrupt stack frame and returns.
+14. `_start` prints `Still alive after breakpoint`.
+15. `_start` spawns two demo kernel tasks and starts the cooperative scheduler.
+16. Each demo task prints short progress, calls `yield_now()`, resumes on its
+    own stack, and eventually returns.
+17. `_start` prints that the cooperative task demo completed.
+18. `_start` enters `hlt_loop()` forever.
 
 Normal boot does not intentionally double fault or page fault. Those failures
 are tested only in separate integration test kernels.
@@ -136,6 +155,9 @@ The project has both `src/lib.rs` and `src/main.rs`.
 - `gdt`
 - `interrupts`
 - `allocator`
+- `task`
+- `scheduler`
+- `arch`
 - `memory`
 - `qemu`
 - `serial`
@@ -174,8 +196,8 @@ See [cpu_tables.md](code_walkthrough/cpu_tables.md).
 
 ## IDT And Exception Handlers
 
-The Interrupt Descriptor Table maps exception vectors to handler functions.
-The current production IDT installs:
+The Interrupt Descriptor Table maps exception and interrupt vectors to handler
+functions. The current production IDT installs these CPU exception entries:
 
 - vector 3: breakpoint
 - vector 8: double fault
@@ -190,6 +212,101 @@ exception. The double-fault handler and page-fault handler halt because this
 kernel cannot recover from them yet.
 
 See [exceptions.md](code_walkthrough/exceptions.md).
+
+## Legacy Hardware Interrupt Foundation
+
+The current hardware interrupt path uses the legacy 8259 Programmable Interrupt
+Controllers and PIT first. This is intentionally simple and matches the roadmap
+step before APIC, scheduling, or userspace work.
+
+The legacy PICs deliver hardware IRQs to CPU interrupt vectors. Their default
+mapping overlaps CPU exception vectors, so the kernel remaps them before
+enabling interrupts:
+
+- primary PIC: IRQ0 through IRQ7 become vectors `32..39`
+- secondary PIC: IRQ8 through IRQ15 become vectors `40..47`
+
+The production IDT installs handlers for the two IRQs this milestone supports:
+
+- IRQ0 timer: vector 32
+- IRQ1 keyboard: vector 33
+
+After remapping, the kernel masks every PIC line except IRQ0 and IRQ1. This
+keeps later device IRQs disabled until the kernel has handlers for them.
+
+The interrupt flow is:
+
+1. A device asserts an IRQ line.
+2. The PIC maps that IRQ to the configured CPU vector.
+3. The CPU looks up that vector in the IDT and enters the `extern
+   "x86-interrupt"` handler.
+4. The handler does the small amount of work for that device.
+5. The handler sends End Of Interrupt to the PIC so another IRQ can be
+   delivered.
+
+The PIT is programmed through ports `0x43` and `0x40` for a 100 Hz channel 0
+timer. The timer handler increments an `AtomicU64` tick counter and sends EOI.
+There is no timer-driven scheduler, sleeping API, or timekeeping abstraction
+yet.
+
+The keyboard handler reads one raw scancode byte from I/O port `0x60`, prints it
+in hexadecimal, and sends EOI. It deliberately does not decode keymaps or build
+input queues yet.
+
+See [exceptions.md](code_walkthrough/exceptions.md) for the handler code.
+
+## Cooperative Kernel Tasks
+
+The task foundation is stackful and cooperative. A task is a kernel function
+plus scheduler metadata:
+
+- a `TaskId`
+- a `TaskState`: `Ready`, `Running`, or `Finished`
+- a saved CPU `Context`
+- a dedicated heap-backed kernel stack
+- a task entry function
+
+Each task gets an 8 KiB stack. That size is deliberately small because the
+current heap is only 100 KiB and this milestone caps the initial task table at
+four tasks. It is enough for the current demo and QEMU test, but it is not a
+final stack-sizing policy.
+
+New task stacks are prepared so the first context switch restores zeroed
+callee-saved registers and returns into a task trampoline. The trampoline calls
+the current task entry function. When that function returns, the trampoline
+marks the task `Finished` and switches away; finished tasks are skipped and not
+resumed. Task stacks are retained for the lifetime of the scheduler, so the
+kernel does not free a stack while still executing on it.
+
+The cooperative context switch saves the x86_64 SysV callee-saved registers:
+
+- `rbp`
+- `rbx`
+- `r12`
+- `r13`
+- `r14`
+- `r15`
+- `rsp`
+
+The instruction pointer is restored through `ret`. Caller-saved registers are
+not preserved by the switch because `yield_now()` is an ordinary function-call
+boundary; Rust already treats caller-saved registers as clobberable across that
+call.
+
+The `yield_now()` path is:
+
+1. The running task calls `scheduler::yield_now()`.
+2. The scheduler finds the next `Ready` task in round-robin order.
+3. The current task becomes `Ready`; the selected task becomes `Running`.
+4. The low-level context switch saves the old stack pointer and callee-saved
+   registers, loads the next task's stack pointer, restores its saved registers,
+   and returns into that task.
+
+The PIT timer interrupt does not call the scheduler yet. This keeps the current
+milestone cooperative only, while the saved context and dedicated task stacks
+are shaped so a later preemptive timer path can reuse them.
+
+See [tasks.md](code_walkthrough/tasks.md).
 
 ## Page Fault Reporting
 
@@ -224,6 +341,12 @@ VGA output is useful for visible early boot messages. Serial output is better
 for automated tests because QEMU can forward it to the terminal with
 `-serial stdio`.
 
+Both output paths are protected with `spin::Mutex` and wrapped in
+`without_interrupts`. This prevents a hardware interrupt handler from trying to
+print while normal code is already holding the same output lock. The tradeoff is
+that printing briefly delays local interrupt delivery, which is acceptable for
+this single-core educational stage but not a final logging design.
+
 See [output_and_qemu.md](code_walkthrough/output_and_qemu.md).
 
 ## QEMU Integration Tests
@@ -234,6 +357,8 @@ The tests are harness-free bootable kernels:
 - `tests/page_fault.rs`
 - `tests/memory_mapping.rs`
 - `tests/heap_allocation.rs`
+- `tests/interrupts.rs`
+- `tests/cooperative_tasks.rs`
 
 They do not use Rust's normal test harness because this is a `no_std` kernel.
 Instead, each test file defines or generates its own `_start`.
@@ -247,7 +372,13 @@ of the production handlers. The memory-mapping test also installs a test-local
 page-fault handler, but success comes from explicitly mapping one scratch page,
 writing through it, and reading the value back. The heap-allocation test
 initializes the same memory mapper and frame allocator, maps the fixed heap, and
-then verifies `Box`, `Vec` growth, and repeated allocation/deallocation.
+then verifies `Box`, `Vec` growth, and repeated allocation/deallocation. The
+interrupt test initializes the production IDT, remapped PICs, and PIT, then
+checks the public interrupt indexes and initial tick counter without enabling
+external interrupts or waiting on timer delivery. The cooperative task test
+initializes the fixed heap, spawns two tasks, verifies deterministic explicit
+yield ordering, checks that task-local state survives context switches, and
+exits QEMU after both tasks finish.
 
 See [tests.md](code_walkthrough/tests.md) and
 [build_config.md](code_walkthrough/build_config.md).
@@ -263,6 +394,8 @@ cargo +nightly test --test stack_overflow
 cargo +nightly test --test page_fault
 cargo +nightly test --test memory_mapping
 cargo +nightly test --test heap_allocation
+cargo +nightly test --test interrupts
+cargo +nightly test --test cooperative_tasks
 ```
 
 Use this to boot the normal kernel:
@@ -276,11 +409,15 @@ there.
 
 ## Current Boundaries
 
-This documentation describes only the current CPU-exception and memory-foundation
-milestones. The kernel still does not have:
+This documentation describes only the current CPU-exception, memory-foundation,
+legacy interrupt-foundation, and cooperative task-foundation milestones. The
+kernel still does not have:
 
 - heap growth or physical frame reclamation
-- hardware IRQ setup
-- scheduler or userspace
+- APIC setup
+- timer-driven preemption
+- kernel stack guard pages
+- userspace
+- keyboard decoding or input queues
 
 Those belong to later roadmap steps in [GENERAL_PLAN.md](../GENERAL_PLAN.md).

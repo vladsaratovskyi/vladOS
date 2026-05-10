@@ -4,7 +4,7 @@
 use core::panic::PanicInfo;
 
 use bootloader::{entry_point, BootInfo};
-use vlad_os::{allocator, gdt, hlt_loop, interrupts, memory, println};
+use vlad_os::{allocator, gdt, hlt_loop, interrupts, memory, println, scheduler};
 use x86_64::{structures::paging::Translate, PhysAddr, VirtAddr};
 
 entry_point!(kernel_main);
@@ -14,6 +14,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     gdt::init();
     interrupts::init_idt();
+    interrupts::init_pics();
+    interrupts::init_pit();
 
     let physical_memory_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(physical_memory_offset) };
@@ -25,9 +27,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
     println!("Heap initialized");
 
+    interrupts::enable_interrupts();
+
     x86_64::instructions::interrupts::int3();
 
     println!("Still alive after breakpoint");
+
+    run_demo_tasks();
 
     hlt_loop();
 }
@@ -73,4 +79,28 @@ fn print_mapping(label: &str, virtual_address: VirtAddr, physical_address: PhysA
         "  {}: {:?} -> {:?}",
         label, virtual_address, physical_address
     );
+}
+
+fn run_demo_tasks() {
+    println!("Starting cooperative task demo");
+
+    scheduler::spawn(demo_task_a).expect("failed to spawn demo task A");
+    scheduler::spawn(demo_task_b).expect("failed to spawn demo task B");
+    scheduler::run();
+
+    println!("Cooperative task demo complete");
+}
+
+fn demo_task_a() {
+    for step in 0..2 {
+        println!("task A: {}", step);
+        scheduler::yield_now();
+    }
+}
+
+fn demo_task_b() {
+    for step in 0..2 {
+        println!("task B: {}", step);
+        scheduler::yield_now();
+    }
 }

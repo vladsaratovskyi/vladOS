@@ -7,9 +7,9 @@
 
 This note documents the earlier CPU setup milestone and the isolated QEMU tests
 that prove the double-fault and page-fault handlers work. The current kernel has
-since added paging changes and a fixed early heap, but it is still small and
-educational on purpose: no hardware IRQs, no PIC or APIC setup, and no
-scheduler.
+since added paging, a fixed early heap, legacy PIC/PIT interrupts, and a
+cooperative task foundation, but it is still small and educational on purpose:
+no APIC setup, no timer-driven preemption, and no userspace.
 
 ## Normal Boot Path
 
@@ -23,10 +23,12 @@ Boot flow:
 4. Build the active page-table mapper from bootloader `BootInfo`.
 5. Print memory diagnostics.
 6. Map the fixed heap and initialize the global allocator.
-7. Trigger one breakpoint exception with `x86_64::instructions::interrupts::int3()`.
-8. Return from the breakpoint handler.
-9. Print `Still alive after breakpoint`.
-10. Halt forever in `hlt_loop()`.
+7. Initialize the legacy PIC/PIT interrupt path and enable CPU interrupts.
+8. Trigger one breakpoint exception with `x86_64::instructions::interrupts::int3()`.
+9. Return from the breakpoint handler.
+10. Print `Still alive after breakpoint`.
+11. Run the short cooperative task demo.
+12. Halt forever in `hlt_loop()`.
 
 The normal boot path does not intentionally trigger a double fault. It only uses
 `int3` because breakpoint exceptions are recoverable and prove that the IDT is
@@ -40,9 +42,11 @@ integration tests can reuse the same setup code.
 It exposes:
 
 - `gdt`: Global Descriptor Table, Task State Segment, and double-fault IST stack.
-- `interrupts`: production IDT and CPU exception handlers.
+- `interrupts`: production IDT, CPU exception handlers, and legacy IRQ setup.
 - `memory`: active page-table access and boot-info frame allocation.
 - `allocator`: fixed heap mapping and global allocator setup.
+- `task` and `scheduler`: stackful cooperative kernel tasks.
+- `arch`: architecture-specific context switch code.
 - `vga_buffer`: VGA `print!` and `println!` macros.
 - `serial`: COM1 serial output used by QEMU tests.
 - `qemu`: QEMU debug-exit support and test panic handling.

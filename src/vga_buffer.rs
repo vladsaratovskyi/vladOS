@@ -1,14 +1,17 @@
 use core::fmt;
 
+use spin::Mutex;
+use x86_64::instructions::interrupts;
+
 const BUFFER_HEIGHT: usize = 25;
 const BUFFER_WIDTH: usize = 80;
 const VGA_BUFFER: *mut u8 = 0xb8000 as *mut u8;
 const COLOR_BYTE: u8 = 0x0f;
 
-static mut WRITER: Writer = Writer {
+static WRITER: Mutex<Writer> = Mutex::new(Writer {
     column_position: 0,
     row_position: 0,
-};
+});
 
 struct Writer {
     column_position: usize,
@@ -92,11 +95,12 @@ impl fmt::Write for Writer {
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
 
-    // This early kernel has no interrupts or multiple CPUs enabled yet, so the
-    // VGA writer is a single global cursor protected only by the boot sequence.
-    unsafe {
-        (*core::ptr::addr_of_mut!(WRITER)).write_fmt(args).unwrap();
-    }
+    // Hardware IRQ handlers can print too. Disabling local interrupts while
+    // holding the writer lock prevents an IRQ from re-entering this path and
+    // spinning forever on the same single-core CPU.
+    interrupts::without_interrupts(|| {
+        WRITER.lock().write_fmt(args).unwrap();
+    });
 }
 
 #[macro_export]

@@ -36,6 +36,8 @@ binary target, integration test kernels, and panic strategy.
 | `[dependencies]` | Starts runtime dependencies. |
 | `bootloader = { version = "0.9", features = ["map_physical_memory"] }` | Provides the bootloader used by `cargo bootimage` and enables the direct physical-memory mapping plus `BootInfo::physical_memory_offset`. |
 | `linked_list_allocator = "0.10.6"` | Provides a small no-std heap allocator suitable for the first fixed-size heap milestone. |
+| `pic8259 = "0.10.2"` | Provides a small `no_std` helper for remapping the legacy chained 8259 PICs and sending EOIs correctly. Cargo currently resolves this to the compatible `0.10.4` release in `Cargo.lock`. |
+| `spin = "0.9.8"` | Provides `no_std` mutexes for PIC access and interrupt-safe VGA/serial output locks. |
 | `x86_64 = "=0.14.7"` | Provides CPU instructions, registers, GDT/TSS/IDT types, and port I/O. The exact pin keeps the known API stable. |
 | `[[bin]]` | Declares the production kernel binary target. |
 | `name = "vlad_os"` | Binary name. |
@@ -49,6 +51,10 @@ binary target, integration test kernels, and panic strategy.
 | `harness = false` | Makes the memory-mapping proof a bootable kernel with its own entry point. |
 | `[[test]] name = "heap_allocation"` | Declares the heap-allocation integration test target. |
 | `harness = false` | Makes the heap test a bootable kernel that exits QEMU after its allocation checks. |
+| `[[test]] name = "interrupts"` | Declares the interrupt-foundation integration test target. |
+| `harness = false` | Makes the interrupt test a bootable kernel that exits QEMU after checking PIC/PIT setup state. |
+| `[[test]] name = "cooperative_tasks"` | Declares the cooperative task integration test target. |
+| `harness = false` | Makes the task test a bootable kernel that exits QEMU after deterministic task switching checks. |
 | `[profile.dev] panic = "abort"` | Development builds abort on panic. There is no stack unwinding runtime. |
 | `[profile.release] panic = "abort"` | Release builds also abort on panic. |
 

@@ -9,6 +9,8 @@ This page covers:
 - `tests/page_fault.rs`
 - `tests/memory_mapping.rs`
 - `tests/heap_allocation.rs`
+- `tests/interrupts.rs`
+- `tests/cooperative_tasks.rs`
 
 These tests are full bootable kernels. They do not use Rust's normal test
 harness. Each file defines or generates its own `_start`, installs only the
@@ -217,3 +219,94 @@ allocation/deallocation.
 | `serial_println!("[ok]");` | Reports success after all heap checks pass. |
 | `exit_qemu(QemuExitCode::Success);` | Exits QEMU with the configured success status. |
 | `test_page_fault_handler(...)` | Prints CR2, the page-fault error code, and the stack frame before exiting QEMU failure. |
+
+## `tests/interrupts.rs`
+
+### Purpose
+
+This test proves that the interrupt foundation can be initialized in a bootable
+kernel: production IDT entries are installed, the legacy PICs are remapped, the
+PIT is programmed, and the public IRQ indexes match the expected timer and
+keyboard vectors.
+
+It deliberately does not enable external interrupts or wait for a PIT tick.
+That keeps the test deterministic and avoids hanging QEMU if an interrupt is
+not delivered in the test environment.
+
+### Invariants
+
+- The test uses the production `interrupts` module.
+- The GDT must be initialized before the production IDT because the IDT includes
+  the double-fault IST stack.
+- PIC and PIT setup must complete before the test exits.
+- Success is reported only after the timer and keyboard vector constants and
+  initial tick counter are checked.
+
+### Line-By-Line
+
+| Code | Explanation |
+| --- | --- |
+| `#![no_std]` | The test kernel cannot use the Rust standard library. |
+| `#![no_main]` | The test provides its own `_start` entry point. |
+| `use vlad_os::{gdt, hlt_loop, interrupts, serial_print, serial_println};` | Imports the production CPU-table and interrupt setup plus serial output. |
+| `pub extern "C" fn _start() -> !` | Defines the test kernel entry point. It never returns. |
+| `vlad_os::serial::init();` | Configures COM1 before printing test output. |
+| `serial_print!("interrupts::pic_pit_foundation...\t");` | Prints the test name without a newline so `[ok]` appears beside it. |
+| `gdt::init();` | Initializes the GDT and TSS before loading the production IDT. |
+| `interrupts::init_idt();` | Loads the production IDT with exception, timer, and keyboard handlers. |
+| `interrupts::init_pics();` | Remaps the legacy PICs and unmasks only IRQ0 and IRQ1. |
+| `interrupts::init_pit();` | Programs PIT channel 0 for the early timer source. |
+| `InterruptIndex::Timer.as_u8()` | Verifies that timer IRQ0 maps to `PIC_1_OFFSET`, vector 32. |
+| `InterruptIndex::Keyboard.as_u8()` | Verifies that keyboard IRQ1 maps to `PIC_1_OFFSET + 1`, vector 33. |
+| `interrupts::timer_ticks()` | Confirms the tick counter starts at zero before external interrupts are enabled. |
+| `serial_println!("[ok]");` | Reports success after all checks pass. |
+| `exit_qemu(QemuExitCode::Success);` | Exits QEMU with the configured success status. |
+| `#[panic_handler]` | Defines panic behavior for this test kernel. |
+| `vlad_os::qemu::test_panic_handler(info);` | Reports assertion failures through serial and QEMU debug-exit. |
+
+## `tests/cooperative_tasks.rs`
+
+### Purpose
+
+This test proves that two stackful kernel tasks can run on separate stacks,
+voluntarily yield to each other, preserve task-local state across switches, and
+finish without being resumed.
+
+### Invariants
+
+- The fixed heap must be initialized before spawning tasks because each task
+  allocates an 8 KiB stack.
+- The test uses deterministic atomic step checks, not PIT timing.
+- Both task entry functions must return so the scheduler exercises finished
+  task handling.
+- Success is reported only after the scheduler returns to the test kernel and
+  both tasks are marked finished.
+
+### Line-By-Line
+
+| Code | Explanation |
+| --- | --- |
+| `#![no_std]` | The test kernel cannot use the Rust standard library. |
+| `#![no_main]` | The bootloader enters through this test's generated `_start`. |
+| `#![feature(abi_x86_interrupt)]` | Enables the interrupt ABI for the test-local page-fault handler. |
+| `static STEP: AtomicUsize = AtomicUsize::new(0);` | Shared deterministic schedule counter. Each task advances it only when it runs at the expected point. |
+| `static COMPLETED_TASKS: AtomicUsize = AtomicUsize::new(0);` | Counts task entries that reached their normal return path. |
+| `entry_point!(test_kernel_main);` | Generates the boot entry point and passes `BootInfo` to the test. |
+| `vlad_os::serial::init();` | Configures COM1 before printing test output. |
+| `serial_print!("cooperative_tasks::round_robin_yield...\t");` | Prints the test name without a newline so `[ok]` appears beside it. |
+| `gdt::init();` | Initializes the GDT/TSS before loading the test-local IDT. |
+| `init_test_idt();` | Installs a page-fault handler that reports failure if stack setup or switching faults. |
+| `memory::init(...)` and `BootInfoFrameAllocator::init(...)` | Reuses the normal page-table and frame allocator setup. |
+| `allocator::init_heap(...)` | Maps the fixed heap before task stack allocation. |
+| `scheduler::spawn(task_a)` and `scheduler::spawn(task_b)` | Creates two tasks with dedicated kernel stacks. |
+| `scheduler::run();` | Switches away from the test stack and returns only after no runnable tasks remain. |
+| `assert_eq!(STEP.load(...), 6);` | Verifies the exact observed schedule: A, B, A, B, A, B. |
+| `assert_eq!(COMPLETED_TASKS.load(...), 2);` | Verifies both task entry functions reached completion. |
+| `scheduler::finished_task_count()` | Verifies the scheduler marked both tasks finished. |
+| `scheduler::all_tasks_finished()` | Verifies no task remains ready or running. |
+| `task_a()` | Uses a local variable, yields twice, and checks that the local value survived each context switch. |
+| `task_b()` | Mirrors task A with a different local value and complementary schedule steps. |
+| `expect_step(expected)` | Uses atomic compare-exchange so a wrong task order fails immediately. |
+| `test_page_fault_handler(...)` | Reports unexpected page faults through serial and exits QEMU with failure. |
+| `#[panic_handler]` | Defines panic behavior for this test kernel. |
+| `vlad_os::qemu::test_panic_handler(info);` | Reports failed assertions through serial and QEMU debug-exit. |

@@ -5,11 +5,14 @@
 extern crate alloc;
 
 pub mod allocator;
+pub mod arch;
 pub mod gdt;
 pub mod interrupts;
 pub mod memory;
 pub mod qemu;
+pub mod scheduler;
 pub mod serial;
+pub mod task;
 pub mod vga_buffer;
 
 pub fn hlt_loop() -> ! {

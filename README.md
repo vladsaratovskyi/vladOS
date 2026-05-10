@@ -27,12 +27,24 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - fixed-size kernel heap at virtual range `0x5555_5555_0000..0x5555_5556_9000`
 - global allocator backed by `linked_list_allocator`
 - `alloc` crate support for kernel `Box` and `Vec`
+- legacy 8259 PIC remapping to vectors 32 through 47
+- PIT channel 0 timer interrupt at 100 Hz
+- global early timer tick counter
+- keyboard IRQ handler that logs raw scancodes from port `0x60`
+- interrupt-safe VGA and serial printing using short interrupt-disabled
+  critical sections around spin-locked writers
+- stackful cooperative kernel tasks
+- dedicated 8 KiB heap-backed kernel stack per task
+- round-robin cooperative scheduler with explicit `yield_now()`
+- x86_64 context switch that saves callee-saved registers and `rsp`
 - one-page virtual mapping proof in an isolated QEMU integration test
 - isolated QEMU integration test for the double-fault path
 - isolated QEMU integration test for the page-fault path
 - isolated QEMU integration test for mapping and writing through one virtual page
 - isolated QEMU integration test for heap allocation
-- no heap growth, threads, userspace, or filesystem
+- isolated QEMU integration test for PIC/PIT interrupt setup
+- isolated QEMU integration test for cooperative task switching
+- no APIC, timer-driven preemption, heap growth, userspace, or filesystem
 
 Documentation entry points:
 
@@ -91,7 +103,12 @@ breakpoint exception with `int3`, handles it, then prints
 compact memory diagnostics: the bootloader-provided physical-memory offset,
 selected virtual-to-physical translations, and the usable memory-region count.
 It then maps the fixed kernel heap, initializes the global allocator, and
-prints `Heap initialized`.
+prints `Heap initialized`. The normal boot also remaps the legacy PICs,
+programs the PIT, unmasks only timer and keyboard IRQs, then enables CPU
+interrupts. Timer interrupts increment an early tick counter; keyboard
+interrupts print raw scancodes. It then starts a short cooperative task demo
+where two stackful kernel tasks print progress and voluntarily yield to each
+other before the kernel enters `hlt_loop()`.
 
 ## Tests
 
@@ -119,6 +136,18 @@ Run the isolated heap-allocation QEMU test:
 cargo +nightly test --test heap_allocation
 ```
 
+Run the isolated interrupt-foundation QEMU test:
+
+```powershell
+cargo +nightly test --test interrupts
+```
+
+Run the isolated cooperative-task QEMU test:
+
+```powershell
+cargo +nightly test --test cooperative_tasks
+```
+
 Expected serial output:
 
 ```text
@@ -126,6 +155,8 @@ stack_overflow::stack_overflow...    [ok]
 page_fault::invalid_memory_access... [ok]
 memory_mapping::map_one_page...      [ok]
 heap_allocation::heap_allocations... [ok]
+interrupts::pic_pit_foundation...    [ok]
+cooperative_tasks::round_robin_yield... [ok]
 ```
 
 The normal kernel boot does not intentionally double fault or page fault. These
@@ -144,6 +175,8 @@ cargo +nightly test --test stack_overflow
 cargo +nightly test --test page_fault
 cargo +nightly test --test memory_mapping
 cargo +nightly test --test heap_allocation
+cargo +nightly test --test interrupts
+cargo +nightly test --test cooperative_tasks
 ```
 
 `cargo +nightly run` boots the normal kernel in QEMU. It does not exit on its

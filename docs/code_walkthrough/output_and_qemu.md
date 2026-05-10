@@ -20,19 +20,22 @@ memory at `0xb8000`.
 
 - VGA text mode is assumed to be available.
 - Each screen cell is two bytes: ASCII byte then color byte.
-- The writer is global and not synchronized. That is acceptable for this early
-  single-core, no-IRQ kernel stage.
+- The writer is global and protected by a `spin::Mutex`.
+- `_print` disables local interrupts while holding the writer lock so an IRQ
+  handler cannot re-enter printing on the same CPU and spin on the lock.
 
 ### Line-By-Line
 
 | Code | Explanation |
 | --- | --- |
 | `use core::fmt;` | Imports formatting traits so the kernel can implement Rust-style `print!` and `println!`. |
+| `use spin::Mutex;` | Imports the `no_std` mutex used to serialize access to the global VGA cursor. |
+| `use x86_64::instructions::interrupts;` | Imports `without_interrupts`, used to make print critical sections safe against hardware IRQ re-entry. |
 | `const BUFFER_HEIGHT: usize = 25;` | VGA text mode has 25 rows. |
 | `const BUFFER_WIDTH: usize = 80;` | VGA text mode has 80 columns. |
 | `const VGA_BUFFER: *mut u8 = 0xb8000 as *mut u8;` | Raw pointer to VGA text memory. |
 | `const COLOR_BYTE: u8 = 0x0f;` | White foreground on black background. |
-| `static mut WRITER: Writer = ...;` | Global cursor state for VGA output. Mutable static keeps early text output independent from heap initialization. |
+| `static WRITER: Mutex<Writer> = ...;` | Global cursor state for VGA output. It is still heap-free, but now serialized for normal code and interrupt handlers. |
 | `struct Writer { column_position, row_position }` | Tracks where the next character will be written. |
 | `fn write_byte(&mut self, byte: u8)` | Writes one byte or handles a newline. |
 | `b'\n' => self.new_line()` | Newline moves the cursor to the next row. |
@@ -59,7 +62,8 @@ memory at `0xb8000`.
 | `impl fmt::Write for Writer` | Allows `write_fmt` to route formatted strings into VGA output. |
 | `fn write_str(&mut self, s: &str) -> fmt::Result` | Required method for `fmt::Write`. |
 | `pub fn _print(args: fmt::Arguments)` | Internal function used by the exported macros. |
-| `(*core::ptr::addr_of_mut!(WRITER)).write_fmt(args).unwrap();` | Writes formatted text through the global VGA writer using raw-pointer access to avoid direct static-mut references. |
+| `interrupts::without_interrupts(|| { ... })` | Temporarily disables local interrupts around the print critical section. This avoids a timer or keyboard IRQ interrupting normal code while the VGA lock is held. |
+| `WRITER.lock().write_fmt(args).unwrap();` | Locks the VGA writer and formats into it without heap allocation. |
 | `macro_rules! print` | Exports a `print!` macro for the whole crate. |
 | `$crate::vga_buffer::_print(format_args!(...))` | Uses `format_args!` without heap allocation. |
 | `macro_rules! println` | Exports newline-aware printing forms. |
@@ -72,16 +76,20 @@ memory at `0xb8000`.
 ### Purpose
 
 The serial module provides COM1 output for QEMU tests. QEMU forwards this to the
-terminal with `-serial stdio`.
+terminal with `-serial stdio`. It uses the same interrupt-safe print pattern as
+VGA output so test diagnostics can also be emitted from interrupt context.
 
 ### Line-By-Line
 
 | Code | Explanation |
 | --- | --- |
 | `use core::fmt;` | Imports formatting support. |
-| `use x86_64::instructions::port::Port;` | Imports safe wrappers around x86 I/O port instructions. Port reads and writes are still unsafe operations. |
+| `use spin::Mutex;` | Imports the `no_std` mutex for serial writes. |
+| `use x86_64::instructions::{interrupts, port::Port};` | Imports `without_interrupts` and safe wrappers around x86 I/O port instructions. Port reads and writes are still unsafe operations. |
 | `const COM1: u16 = 0x3f8;` | Base I/O port for the first serial port. |
+| `static SERIAL1: Mutex<SerialPort> = ...;` | Global COM1 writer lock used by the serial print macros. |
 | `pub fn init()` | Configures COM1 before tests write to it. |
+| `interrupts::without_interrupts(|| unsafe { ... })` | Keeps serial initialization from being interrupted halfway through the port programming sequence. |
 | `Port::new(COM1 + 1).write(0x00u8);` | Disables serial interrupts. |
 | `Port::new(COM1 + 3).write(0x80u8);` | Enables DLAB so the divisor can be configured. |
 | `Port::new(COM1).write(0x03u8);` | Sets divisor low byte for 38400 baud. |
@@ -95,7 +103,8 @@ terminal with `-serial stdio`.
 | `impl fmt::Write for SerialPort` | Lets formatted strings write to serial. |
 | `for byte in s.bytes()` | Sends a string one byte at a time. |
 | `pub fn _print(args: fmt::Arguments)` | Internal formatter entry point used by serial macros. |
-| `SerialPort.write_fmt(args).unwrap();` | Formats directly into the zero-sized serial writer. |
+| `interrupts::without_interrupts(|| { ... })` | Prevents hardware IRQ re-entry while the serial lock is held. |
+| `SERIAL1.lock().write_fmt(args).unwrap();` | Formats directly into the serial writer while holding the lock. |
 | `macro_rules! serial_print` | Exports `serial_print!` for test kernels. |
 | `macro_rules! serial_println` | Exports newline-aware serial printing. |
 

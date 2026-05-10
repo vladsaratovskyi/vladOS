@@ -1,11 +1,14 @@
 use core::fmt;
 
-use x86_64::instructions::port::Port;
+use spin::Mutex;
+use x86_64::instructions::{interrupts, port::Port};
 
 const COM1: u16 = 0x3f8;
 
+static SERIAL1: Mutex<SerialPort> = Mutex::new(SerialPort);
+
 pub fn init() {
-    unsafe {
+    interrupts::without_interrupts(|| unsafe {
         Port::new(COM1 + 1).write(0x00u8);
         Port::new(COM1 + 3).write(0x80u8);
         Port::new(COM1).write(0x03u8);
@@ -13,7 +16,7 @@ pub fn init() {
         Port::new(COM1 + 3).write(0x03u8);
         Port::new(COM1 + 2).write(0xc7u8);
         Port::new(COM1 + 4).write(0x0bu8);
-    }
+    });
 }
 
 struct SerialPort;
@@ -39,7 +42,9 @@ impl fmt::Write for SerialPort {
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
 
-    SerialPort.write_fmt(args).unwrap();
+    interrupts::without_interrupts(|| {
+        SERIAL1.lock().write_fmt(args).unwrap();
+    });
 }
 
 #[macro_export]
