@@ -5,9 +5,10 @@ is meant to be read before the line-by-line walkthroughs in
 [code_walkthrough/](code_walkthrough/README.md).
 
 The project is an educational `x86_64` Rust kernel. It is deliberately small:
-there is no heap, no PIC/APIC setup, no hardware IRQs, no userspace, and no
-scheduler yet. The current goal is to establish the first memory-management
-foundation without jumping ahead to heap allocation, multitasking, or userspace.
+there is now only a fixed early heap, with no PIC/APIC setup, no hardware IRQs,
+no userspace, and no scheduler yet. The current goal is to finish the first
+memory-management foundation without jumping ahead to dynamic memory growth,
+multitasking, or userspace.
 
 ## What Exists Today
 
@@ -28,9 +29,13 @@ The kernel currently has:
 - active level-4 page table access through `CR3`
 - an `OffsetPageTable` mapper over the current page-table hierarchy
 - a simple monotonic physical frame allocator for usable 4 KiB frames
+- a fixed-size kernel heap at virtual address `0x5555_5555_0000`
+- a global allocator backed by `linked_list_allocator`
+- `alloc` crate support for kernel `Box` and `Vec`
 - one isolated double-fault test kernel
 - one isolated page-fault test kernel
 - one isolated memory-mapping test kernel
+- one isolated heap-allocation test kernel
 
 For line-by-line details, start with
 [kernel_entry.md](code_walkthrough/kernel_entry.md).
@@ -53,7 +58,7 @@ The kernel is not a normal Rust program:
 - `BootInfo` gives the kernel the memory map and the direct physical-memory
   offset selected by the bootloader.
 
-The target file `x86_64-blog_os.json` disables the red zone and disables
+The target file `x86_64-vlad_os.json` disables the red zone and disables
 SIMD/floating-point code generation. Early interrupt handlers must not emit SSE
 instructions before the kernel explicitly enables that CPU state.
 
@@ -64,7 +69,7 @@ Cargo configuration line by line.
 
 Normal boot follows this sequence:
 
-1. `_start` prints `Hello from Rust OS!` through VGA text mode.
+1. `_start` prints `Hello from vladOS!` through VGA text mode.
 2. `_start` calls `gdt::init()`.
 3. `gdt::init()` configures the TSS, builds and loads the GDT, sets `CS`, and
    loads the TSS selector.
@@ -75,10 +80,12 @@ Normal boot follows this sequence:
    `OffsetPageTable` for the active page-table hierarchy.
 7. `_start` prints compact memory diagnostics: the physical-memory offset,
    selected virtual-to-physical translations, and the usable region count.
-8. `_start` executes `int3`, intentionally raising a breakpoint exception.
-9. The breakpoint handler prints the interrupt stack frame and returns.
-10. `_start` prints `Still alive after breakpoint`.
-11. `_start` enters `hlt_loop()` forever.
+8. `_start` creates the boot-info frame allocator, maps the fixed heap pages,
+   initializes the global allocator, and prints `Heap initialized`.
+9. `_start` executes `int3`, intentionally raising a breakpoint exception.
+10. The breakpoint handler prints the interrupt stack frame and returns.
+11. `_start` prints `Still alive after breakpoint`.
+12. `_start` enters `hlt_loop()` forever.
 
 Normal boot does not intentionally double fault or page fault. Those failures
 are tested only in separate integration test kernels.
@@ -103,18 +110,22 @@ The current strategy is:
 - `OffsetPageTable` edits the active hierarchy through that mapping
 - only regions marked `MemoryRegionType::Usable` are handed out by the early
   frame allocator
+- the fixed heap virtual range is mapped to fresh usable physical frames before
+  the allocator receives it
 
-This is not yet the final virtual-memory layout. The kernel is not redesigning
-identity mapping, higher-half mapping, kernel/user separation, or heap layout in
-this milestone. Those decisions remain later work after the current page-table
-and frame-allocation basics are solid.
+The heap starts at `0x5555_5555_0000` and is 100 KiB. This avoids the
+`0x4444_4444_0000` scratch page used by the page-fault and memory-mapping tests.
+The allocator manages virtual heap memory only; paging has already assigned
+physical frames to every heap page. The heap does not grow, reclaim physical
+frames, demand-map pages, or use slabs yet.
 
 The frame allocator is deliberately simple. It walks the bootloader memory map,
 turns usable regions into 4 KiB frames, and returns the `next` frame on each
 allocation. It never frees frames and is not efficient, but it is enough for
-early page-table work.
+early page-table and fixed heap work.
 
-See [memory.md](code_walkthrough/memory.md).
+See [memory.md](code_walkthrough/memory.md) and
+[allocator.md](code_walkthrough/allocator.md).
 
 ## Shared Library vs Boot Binary
 
@@ -124,6 +135,7 @@ The project has both `src/lib.rs` and `src/main.rs`.
 
 - `gdt`
 - `interrupts`
+- `allocator`
 - `memory`
 - `qemu`
 - `serial`
@@ -221,6 +233,7 @@ The tests are harness-free bootable kernels:
 - `tests/stack_overflow.rs`
 - `tests/page_fault.rs`
 - `tests/memory_mapping.rs`
+- `tests/heap_allocation.rs`
 
 They do not use Rust's normal test harness because this is a `no_std` kernel.
 Instead, each test file defines or generates its own `_start`.
@@ -232,7 +245,9 @@ treats status `33` as success because `0x10` becomes `(0x10 << 1) | 1`.
 Each exception-oriented test owns a test-local IDT so success behavior stays out
 of the production handlers. The memory-mapping test also installs a test-local
 page-fault handler, but success comes from explicitly mapping one scratch page,
-writing through it, and reading the value back.
+writing through it, and reading the value back. The heap-allocation test
+initializes the same memory mapper and frame allocator, maps the fixed heap, and
+then verifies `Box`, `Vec` growth, and repeated allocation/deallocation.
 
 See [tests.md](code_walkthrough/tests.md) and
 [build_config.md](code_walkthrough/build_config.md).
@@ -247,6 +262,7 @@ cargo +nightly bootimage
 cargo +nightly test --test stack_overflow
 cargo +nightly test --test page_fault
 cargo +nightly test --test memory_mapping
+cargo +nightly test --test heap_allocation
 ```
 
 Use this to boot the normal kernel:
@@ -263,7 +279,7 @@ there.
 This documentation describes only the current CPU-exception and memory-foundation
 milestones. The kernel still does not have:
 
-- heap allocation
+- heap growth or physical frame reclamation
 - hardware IRQ setup
 - scheduler or userspace
 

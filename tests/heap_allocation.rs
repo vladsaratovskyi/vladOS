@@ -2,18 +2,18 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
+extern crate alloc;
+
+use alloc::{boxed::Box, vec::Vec};
 use core::panic::PanicInfo;
 
 use bootloader::{entry_point, BootInfo};
 use vlad_os::memory::BootInfoFrameAllocator;
 use vlad_os::qemu::{exit_qemu, QemuExitCode};
-use vlad_os::{gdt, hlt_loop, memory, serial_print, serial_println};
+use vlad_os::{allocator, gdt, hlt_loop, memory, serial_print, serial_println};
 use x86_64::{
     registers::control::Cr2,
-    structures::{
-        idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
-        paging::{FrameAllocator, Mapper, Page, PageTableFlags, Translate},
-    },
+    structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
     VirtAddr,
 };
 
@@ -23,7 +23,7 @@ entry_point!(test_kernel_main);
 
 fn test_kernel_main(boot_info: &'static BootInfo) -> ! {
     vlad_os::serial::init();
-    serial_print!("memory_mapping::map_one_page...\t");
+    serial_print!("heap_allocation::heap_allocations...\t");
 
     gdt::init();
     init_test_idt();
@@ -32,35 +32,42 @@ fn test_kernel_main(boot_info: &'static BootInfo) -> ! {
     let mut mapper = unsafe { memory::init(physical_memory_offset) };
     let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
 
-    let page = Page::containing_address(VirtAddr::new(0x4444_4444_0000));
-    assert!(
-        mapper.translate_addr(page.start_address()).is_none(),
-        "scratch page was unexpectedly already mapped"
-    );
+    allocator::init_heap(&mut mapper, &mut frame_allocator).expect("failed to initialize heap");
 
-    let frame = frame_allocator
-        .allocate_frame()
-        .expect("no usable physical frames available");
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-
-    unsafe {
-        mapper
-            .map_to(page, frame, flags, &mut frame_allocator)
-            .expect("failed to map scratch page")
-            .flush();
-    }
-
-    let value = 0x_f021_f077_f065_f04e;
-    let ptr: *mut u64 = page.start_address().as_mut_ptr();
-
-    unsafe {
-        core::ptr::write_volatile(ptr, value);
-        assert_eq!(core::ptr::read_volatile(ptr), value);
-    }
+    simple_box_allocation();
+    vec_allocation_and_growth();
+    many_boxes_with_deallocation();
 
     serial_println!("[ok]");
     exit_qemu(QemuExitCode::Success);
     hlt_loop();
+}
+
+fn simple_box_allocation() {
+    let heap_value = Box::new(41);
+
+    assert_eq!(*heap_value, 41);
+}
+
+fn vec_allocation_and_growth() {
+    let mut vec: Vec<u64> = Vec::new();
+
+    for i in 0u64..500 {
+        vec.push(i);
+    }
+
+    assert_eq!(vec.iter().copied().sum::<u64>(), 499 * 500 / 2);
+}
+
+fn many_boxes_with_deallocation() {
+    for i in 0u64..1000 {
+        let x = Box::new(i);
+
+        assert_eq!(*x, i);
+    }
+
+    let reused = Box::new(1234u64);
+    assert_eq!(*reused, 1234);
 }
 
 fn init_test_idt() {

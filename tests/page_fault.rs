@@ -4,8 +4,8 @@
 
 use core::panic::PanicInfo;
 
-use blog_os::qemu::{exit_qemu, QemuExitCode};
-use blog_os::{gdt, hlt_loop, serial_print, serial_println};
+use vlad_os::qemu::{exit_qemu, QemuExitCode};
+use vlad_os::{gdt, hlt_loop, serial_print, serial_println};
 use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
@@ -13,7 +13,7 @@ static mut TEST_IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    blog_os::serial::init();
+    vlad_os::serial::init();
     serial_print!("page_fault::invalid_memory_access...\t");
 
     gdt::init();
@@ -59,5 +59,5 @@ extern "x86-interrupt" fn test_page_fault_handler(
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    blog_os::qemu::test_panic_handler(info);
+    vlad_os::qemu::test_panic_handler(info);
 }

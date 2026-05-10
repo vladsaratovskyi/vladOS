@@ -11,12 +11,13 @@ Read order:
 2. [cpu_tables.md](cpu_tables.md): `src/gdt.rs`
 3. [exceptions.md](exceptions.md): `src/interrupts.rs`
 4. [memory.md](memory.md): `src/memory.rs`
-5. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
+5. [allocator.md](allocator.md): `src/allocator.rs`
+6. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
    `src/serial.rs`, and `src/qemu.rs`
-6. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
-   and `tests/memory_mapping.rs`
-7. [build_config.md](build_config.md): `Cargo.toml`, `.cargo/config.toml`,
-   `x86_64-blog_os.json`, and `rust-toolchain.toml`
+7. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
+   `tests/memory_mapping.rs`, and `tests/heap_allocation.rs`
+8. [build_config.md](build_config.md): `Cargo.toml`, `.cargo/config.toml`,
+   `x86_64-vlad_os.json`, and `rust-toolchain.toml`
 
 ## How To Read The Tables
 

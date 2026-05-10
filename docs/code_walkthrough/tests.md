@@ -8,6 +8,7 @@ This page covers:
 - `tests/stack_overflow.rs`
 - `tests/page_fault.rs`
 - `tests/memory_mapping.rs`
+- `tests/heap_allocation.rs`
 
 These tests are full bootable kernels. They do not use Rust's normal test
 harness. Each file defines or generates its own `_start`, installs only the
@@ -36,13 +37,13 @@ stack. It intentionally overflows the normal kernel stack.
 | `#![no_main]` | The test provides its own `_start` entry point. |
 | `#![feature(abi_x86_interrupt)]` | Enables the interrupt ABI for the test handler. |
 | `use core::panic::PanicInfo;` | Imports panic information for the test panic handler. |
-| `use blog_os::qemu::{exit_qemu, QemuExitCode};` | Imports QEMU pass/fail exit support. |
-| `use blog_os::{gdt, hlt_loop, serial_print, serial_println};` | Imports shared GDT setup, halt behavior, and serial output. |
+| `use vlad_os::qemu::{exit_qemu, QemuExitCode};` | Imports QEMU pass/fail exit support. |
+| `use vlad_os::{gdt, hlt_loop, serial_print, serial_println};` | Imports shared GDT setup, halt behavior, and serial output. |
 | `use x86_64::structures::idt::{...};` | Imports IDT and handler argument types. |
 | `static mut TEST_IDT: InterruptDescriptorTable = ...;` | Stores the test-local IDT at a stable address. |
 | `#[no_mangle]` | Keeps the `_start` symbol visible to the bootloader. |
 | `pub extern "C" fn _start() -> !` | Defines the test kernel entry point. It never returns. |
-| `blog_os::serial::init();` | Configures COM1 before printing test output. |
+| `vlad_os::serial::init();` | Configures COM1 before printing test output. |
 | `serial_print!("stack_overflow::stack_overflow...\t");` | Prints the test name without a newline so `[ok]` appears beside it. |
 | `gdt::init();` | Initializes the GDT and TSS, including the double-fault IST stack. |
 | `init_test_idt();` | Loads the test-local IDT with a double-fault handler. |
@@ -64,7 +65,7 @@ stack. It intentionally overflows the normal kernel stack.
 | `exit_qemu(QemuExitCode::Success);` | Exits QEMU with the configured success status. |
 | `hlt_loop();` | Halts forever if QEMU does not exit. |
 | `#[panic_handler]` | Defines the test kernel panic handler. |
-| `blog_os::qemu::test_panic_handler(info);` | Prints failure, exits QEMU with failure, and halts. |
+| `vlad_os::qemu::test_panic_handler(info);` | Prints failure, exits QEMU with failure, and halts. |
 
 ## `tests/page_fault.rs`
 
@@ -87,13 +88,13 @@ handler. It intentionally reads from a canonical but likely unmapped address.
 | `#![no_main]` | Disables the normal Rust `main` path. |
 | `#![feature(abi_x86_interrupt)]` | Enables the interrupt ABI for the page-fault handler. |
 | `use core::panic::PanicInfo;` | Imports panic information. |
-| `use blog_os::qemu::{exit_qemu, QemuExitCode};` | Imports QEMU success/failure reporting. |
-| `use blog_os::{gdt, hlt_loop, serial_print, serial_println};` | Imports shared GDT setup, halt loop, and serial macros. |
+| `use vlad_os::qemu::{exit_qemu, QemuExitCode};` | Imports QEMU success/failure reporting. |
+| `use vlad_os::{gdt, hlt_loop, serial_print, serial_println};` | Imports shared GDT setup, halt loop, and serial macros. |
 | `use x86_64::registers::control::Cr2;` | Imports access to the faulting-address register. |
 | `use x86_64::structures::idt::{...};` | Imports IDT and page-fault handler argument types. |
 | `static mut TEST_IDT: InterruptDescriptorTable = ...;` | Static test-local IDT storage. |
 | `pub extern "C" fn _start() -> !` | Test kernel entry point. |
-| `blog_os::serial::init();` | Initializes COM1 serial output. |
+| `vlad_os::serial::init();` | Initializes COM1 serial output. |
 | `serial_print!("page_fault::invalid_memory_access...\t");` | Prints the test name. |
 | `gdt::init();` | Initializes GDT/TSS. The page-fault test does not require IST, but this keeps test setup consistent. |
 | `init_test_idt();` | Loads an IDT with the test page-fault handler. |
@@ -116,7 +117,7 @@ handler. It intentionally reads from a canonical but likely unmapped address.
 | `exit_qemu(QemuExitCode::Success);` | Exits QEMU successfully. |
 | `hlt_loop();` | Halts if QEMU does not exit. |
 | `#[panic_handler]` | Defines panic behavior for this test kernel. |
-| `blog_os::qemu::test_panic_handler(info);` | Reports failure through serial and QEMU debug-exit. |
+| `vlad_os::qemu::test_panic_handler(info);` | Reports failure through serial and QEMU debug-exit. |
 
 ## `tests/memory_mapping.rs`
 
@@ -143,15 +144,15 @@ after the write is verified.
 | `#![no_main]` | The test provides a boot entry point instead of a Rust `main`. |
 | `#![feature(abi_x86_interrupt)]` | Enables the interrupt ABI for the test page-fault handler. |
 | `use core::panic::PanicInfo;` | Imports panic information for the test panic handler. |
-| `use blog_os::memory::BootInfoFrameAllocator;` | Imports the early physical frame allocator. |
-| `use blog_os::qemu::{exit_qemu, QemuExitCode};` | Imports QEMU pass/fail exit support. |
-| `use blog_os::{gdt, hlt_loop, memory, serial_print, serial_println};` | Imports shared setup, memory, halt behavior, and serial output. |
+| `use vlad_os::memory::BootInfoFrameAllocator;` | Imports the early physical frame allocator. |
+| `use vlad_os::qemu::{exit_qemu, QemuExitCode};` | Imports QEMU pass/fail exit support. |
+| `use vlad_os::{gdt, hlt_loop, memory, serial_print, serial_println};` | Imports shared setup, memory, halt behavior, and serial output. |
 | `use bootloader::{entry_point, BootInfo};` | Imports the typed boot entry macro and boot information structure. |
 | `use x86_64::{ ... };` | Imports CR2, IDT types, paging traits, page types, flags, and virtual addresses. |
 | `static mut TEST_IDT: InterruptDescriptorTable = ...;` | Stores the test-local IDT at a stable address. |
 | `entry_point!(test_kernel_main);` | Generates `_start` and verifies that `test_kernel_main` accepts `&'static BootInfo`. |
 | `fn test_kernel_main(boot_info: &'static BootInfo) -> !` | Defines the memory-mapping test entry point. |
-| `blog_os::serial::init();` | Configures COM1 before printing test output. |
+| `vlad_os::serial::init();` | Configures COM1 before printing test output. |
 | `serial_print!("memory_mapping::map_one_page...\t");` | Prints the test name without a newline so `[ok]` appears beside it. |
 | `gdt::init();` | Initializes GDT/TSS setup before loading the test IDT. |
 | `init_test_idt();` | Loads a page-fault handler that reports failure if the mapping proof faults. |
@@ -178,4 +179,41 @@ after the write is verified.
 | `serial_println!("[failed]");` | Marks the unexpected page fault as a test failure. |
 | `exit_qemu(QemuExitCode::Failed);` | Exits QEMU with failure status. |
 | `#[panic_handler]` | Defines panic behavior for this test kernel. |
-| `blog_os::qemu::test_panic_handler(info);` | Reports assertion failures and other panics through serial and QEMU debug-exit. |
+| `vlad_os::qemu::test_panic_handler(info);` | Reports assertion failures and other panics through serial and QEMU debug-exit. |
+
+## `tests/heap_allocation.rs`
+
+### Purpose
+
+This test proves that the fixed heap is mapped and that the global allocator can
+serve real `alloc` crate types. It initializes the mapper and frame allocator,
+calls `allocator::init_heap`, then checks `Box`, `Vec`, and repeated
+allocation/deallocation.
+
+### Invariants
+
+- The test uses `bootloader::entry_point!` so it can receive `BootInfo`.
+- The heap must be initialized before any `Box` or `Vec` is created.
+- A test-local page-fault handler reports failure if a heap page was not mapped.
+- Success is reported only after all allocation checks pass.
+
+### Line-By-Line
+
+| Code | Explanation |
+| --- | --- |
+| `extern crate alloc;` | Makes `alloc` crate types available in this no-std test kernel. |
+| `use alloc::{boxed::Box, vec::Vec};` | Imports the heap-backed types used by the checks. |
+| `use vlad_os::{allocator, ...};` | Imports fixed heap setup along with shared test setup helpers. |
+| `entry_point!(test_kernel_main);` | Generates the boot entry point and passes `BootInfo` to the test. |
+| `serial_print!("heap_allocation::heap_allocations...\t");` | Prints the test name without a newline so `[ok]` appears beside it. |
+| `gdt::init();` | Initializes GDT/TSS before loading the test-local IDT. |
+| `init_test_idt();` | Loads a page-fault handler that marks the test failed on unexpected faults. |
+| `let mut mapper = unsafe { memory::init(physical_memory_offset) };` | Creates the active page-table mapper from the bootloader direct-map offset. |
+| `let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };` | Creates the monotonic physical frame allocator from usable bootloader regions. |
+| `allocator::init_heap(&mut mapper, &mut frame_allocator).expect(...)` | Maps all heap pages and initializes the global allocator before any heap allocation occurs. |
+| `simple_box_allocation();` | Allocates one `Box`, reads the value back, and drops it at function exit. |
+| `vec_allocation_and_growth();` | Pushes 500 `u64` values into a `Vec`, forcing allocation and growth, then verifies the sum. |
+| `many_boxes_with_deallocation();` | Repeatedly allocates and drops boxes, then allocates once more to show freed heap blocks are reusable. |
+| `serial_println!("[ok]");` | Reports success after all heap checks pass. |
+| `exit_qemu(QemuExitCode::Success);` | Exits QEMU with the configured success status. |
+| `test_page_fault_handler(...)` | Prints CR2, the page-fault error code, and the stack frame before exiting QEMU failure. |

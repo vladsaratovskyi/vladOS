@@ -1,4 +1,4 @@
-# blog_os
+# vladOS
 
 Minimal x86_64 bare-metal Rust kernel following the first milestones from
 Philipp Oppermann's Writing an OS in Rust.
@@ -24,11 +24,15 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - bootloader-provided direct physical-memory offset mapping
 - active level-4 page table access through `CR3`
 - simple monotonic physical frame allocator over usable bootloader regions
+- fixed-size kernel heap at virtual range `0x5555_5555_0000..0x5555_5556_9000`
+- global allocator backed by `linked_list_allocator`
+- `alloc` crate support for kernel `Box` and `Vec`
 - one-page virtual mapping proof in an isolated QEMU integration test
 - isolated QEMU integration test for the double-fault path
 - isolated QEMU integration test for the page-fault path
 - isolated QEMU integration test for mapping and writing through one virtual page
-- no heap allocator, threads, userspace, or filesystem
+- isolated QEMU integration test for heap allocation
+- no heap growth, threads, userspace, or filesystem
 
 Documentation entry points:
 
@@ -70,7 +74,7 @@ cargo +nightly bootimage
 The image is created at:
 
 ```text
-target/x86_64-blog_os/debug/bootimage-blog_os.bin
+target/x86_64-vlad_os/debug/bootimage-vlad_os.bin
 ```
 
 Run it in QEMU after installing QEMU and adding `qemu-system-x86_64` to PATH:
@@ -79,13 +83,15 @@ Run it in QEMU after installing QEMU and adding `qemu-system-x86_64` to PATH:
 cargo +nightly run
 ```
 
-Expected output: QEMU boots and the VGA screen shows `Hello from Rust OS!`.
+Expected output: QEMU boots and the VGA screen shows `Hello from vladOS!`.
 
 The current normal boot also initializes the GDT/TSS and IDT, triggers one
 breakpoint exception with `int3`, handles it, then prints
 `Still alive after breakpoint`. Before the breakpoint proof, it also prints
 compact memory diagnostics: the bootloader-provided physical-memory offset,
 selected virtual-to-physical translations, and the usable memory-region count.
+It then maps the fixed kernel heap, initializes the global allocator, and
+prints `Heap initialized`.
 
 ## Tests
 
@@ -107,17 +113,25 @@ Run the isolated memory-mapping QEMU test:
 cargo +nightly test --test memory_mapping
 ```
 
+Run the isolated heap-allocation QEMU test:
+
+```powershell
+cargo +nightly test --test heap_allocation
+```
+
 Expected serial output:
 
 ```text
 stack_overflow::stack_overflow...    [ok]
 page_fault::invalid_memory_access... [ok]
 memory_mapping::map_one_page...      [ok]
+heap_allocation::heap_allocations... [ok]
 ```
 
 The normal kernel boot does not intentionally double fault or page fault. These
 are separate test kernels that exit QEMU successfully only from their exception
-handlers or from the explicit memory-mapping proof.
+handlers, from the explicit memory-mapping proof, or from the heap allocation
+checks.
 
 ## Verification commands
 
@@ -129,6 +143,7 @@ cargo +nightly bootimage
 cargo +nightly test --test stack_overflow
 cargo +nightly test --test page_fault
 cargo +nightly test --test memory_mapping
+cargo +nightly test --test heap_allocation
 ```
 
 `cargo +nightly run` boots the normal kernel in QEMU. It does not exit on its

@@ -7,14 +7,18 @@ This page covers `src/memory.rs`.
 
 ## Purpose
 
-`memory.rs` contains the first memory-management foundation. It does not create
-a heap or a final virtual address-space layout. It gives the kernel enough tools
-to inspect and edit the active page-table hierarchy:
+`memory.rs` contains the paging and physical-frame foundation. It does not own
+the heap allocator; `allocator.rs` uses this module to map heap pages before it
+initializes the global allocator. This file gives the kernel enough tools to
+inspect and edit the active page-table hierarchy:
 
 - access the active level-4 page table through `CR3`
 - use the bootloader-provided physical-memory offset mapping
 - create an `OffsetPageTable`
 - allocate unused 4 KiB physical frames from the bootloader memory map
+
+Heap setup stays in [allocator.md](allocator.md) so page/frame mapping and heap
+policy remain separate.
 
 ## Invariants
 
@@ -25,7 +29,8 @@ to inspect and edit the active page-table hierarchy:
 - `BootInfoFrameAllocator` may hand out only frames from
   `MemoryRegionType::Usable` regions.
 - The frame allocator is monotonic: it never frees frames and is intentionally
-  only an early bootstrap allocator.
+  only an early bootstrap allocator. Heap allocation can reuse virtual heap
+  blocks, but physical frames are not returned to this allocator yet.
 
 ## Line-By-Line
 

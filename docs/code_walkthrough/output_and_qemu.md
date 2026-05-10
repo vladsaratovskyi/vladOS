@@ -32,7 +32,7 @@ memory at `0xb8000`.
 | `const BUFFER_WIDTH: usize = 80;` | VGA text mode has 80 columns. |
 | `const VGA_BUFFER: *mut u8 = 0xb8000 as *mut u8;` | Raw pointer to VGA text memory. |
 | `const COLOR_BYTE: u8 = 0x0f;` | White foreground on black background. |
-| `static mut WRITER: Writer = ...;` | Global cursor state for VGA output. Mutable static is used because there is no allocator or lock yet. |
+| `static mut WRITER: Writer = ...;` | Global cursor state for VGA output. Mutable static keeps early text output independent from heap initialization. |
 | `struct Writer { column_position, row_position }` | Tracks where the next character will be written. |
 | `fn write_byte(&mut self, byte: u8)` | Writes one byte or handles a newline. |
 | `b'\n' => self.new_line()` | Newline moves the cursor to the next row. |
