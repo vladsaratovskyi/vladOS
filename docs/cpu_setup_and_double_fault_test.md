@@ -1,5 +1,10 @@
 # CPU Setup And Exception Tests
 
+> Current docs live in [architecture.md](architecture.md), with detailed
+> line-by-line walkthroughs under
+> [code_walkthrough/](code_walkthrough/README.md). This file is kept as a
+> milestone note for the CPU exception work.
+
 This note documents the current early CPU setup milestone and the isolated QEMU
 tests that prove the double-fault and page-fault handlers work. The kernel is
 still small and educational on purpose: no heap, no paging changes, no hardware

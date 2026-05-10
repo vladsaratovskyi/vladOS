@@ -24,8 +24,15 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - isolated QEMU integration test for the page-fault path
 - no heap, allocator, threads, or filesystem
 
-See [docs/cpu_setup_and_double_fault_test.md](docs/cpu_setup_and_double_fault_test.md)
-for the current CPU setup and test architecture.
+Documentation entry points:
+
+- [High-level architecture guide](docs/architecture.md): explains how the
+  kernel boots, how the CPU tables fit together, and how the QEMU tests work.
+- [Low-level code walkthroughs](docs/code_walkthrough/README.md): explains the
+  current source, test, and configuration files line by line or in tight code
+  groups.
+- [General roadmap](GENERAL_PLAN.md): records the longer-term study and
+  implementation order.
 
 ## Tooling
 
@@ -96,3 +103,17 @@ page_fault::invalid_memory_access... [ok]
 The normal kernel boot does not intentionally double fault or page fault. These
 are separate test kernels that exit QEMU successfully only from their exception
 handlers.
+
+## Verification commands
+
+Use these after changing kernel code or test configuration:
+
+```powershell
+cargo +nightly check
+cargo +nightly bootimage
+cargo +nightly test --test stack_overflow
+cargo +nightly test --test page_fault
+```
+
+`cargo +nightly run` boots the normal kernel in QEMU. It does not exit on its
+own because the production kernel ends in `hlt_loop()`.
