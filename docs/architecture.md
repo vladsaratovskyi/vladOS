@@ -5,9 +5,9 @@ is meant to be read before the line-by-line walkthroughs in
 [code_walkthrough/](code_walkthrough/README.md).
 
 The project is an educational `x86_64` Rust kernel. It is deliberately small:
-there is no heap, no frame allocator, no PIC/APIC setup, no hardware IRQs, no
-userspace, and no scheduler yet. The current goal is to make CPU exception
-handling understandable and testable.
+there is no heap, no PIC/APIC setup, no hardware IRQs, no userspace, and no
+scheduler yet. The current goal is to establish the first memory-management
+foundation without jumping ahead to heap allocation, multitasking, or userspace.
 
 ## What Exists Today
 
@@ -22,8 +22,15 @@ The kernel currently has:
 - a dedicated double-fault IST stack
 - IDT initialization
 - handlers for breakpoint, double fault, and page fault exceptions
+- bootloader `BootInfo` handling in the normal kernel entry point
+- bootloader-provided physical memory map access
+- bootloader-provided direct physical-memory offset mapping
+- active level-4 page table access through `CR3`
+- an `OffsetPageTable` mapper over the current page-table hierarchy
+- a simple monotonic physical frame allocator for usable 4 KiB frames
 - one isolated double-fault test kernel
 - one isolated page-fault test kernel
+- one isolated memory-mapping test kernel
 
 For line-by-line details, start with
 [kernel_entry.md](code_walkthrough/kernel_entry.md).
@@ -32,7 +39,8 @@ For line-by-line details, start with
 
 The kernel uses the `bootloader = "0.9"` crate and `cargo bootimage`. The
 bootloader creates enough early CPU state to enter the kernel in 64-bit long
-mode, then jumps to `_start` in `src/main.rs`.
+mode, builds a `BootInfo` structure, then jumps to the `_start` symbol generated
+by `bootloader::entry_point!` in `src/main.rs`.
 
 The kernel is not a normal Rust program:
 
@@ -42,6 +50,8 @@ The kernel is not a normal Rust program:
   bootloader jumps to our `_start` symbol directly.
 - `panic = "abort"` means panics do not unwind the stack. In a kernel with no
   runtime, unwinding would need infrastructure we do not have.
+- `BootInfo` gives the kernel the memory map and the direct physical-memory
+  offset selected by the bootloader.
 
 The target file `x86_64-blog_os.json` disables the red zone and disables
 SIMD/floating-point code generation. Early interrupt handlers must not emit SSE
@@ -61,16 +71,50 @@ Normal boot follows this sequence:
 4. `_start` calls `interrupts::init_idt()`.
 5. `interrupts::init_idt()` installs exception handlers into the IDT and loads
    it with `lidt`.
-6. `_start` executes `int3`, intentionally raising a breakpoint exception.
-7. The breakpoint handler prints the interrupt stack frame and returns.
-8. `_start` prints `Still alive after breakpoint`.
-9. `_start` enters `hlt_loop()` forever.
+6. `_start` reads `boot_info.physical_memory_offset` and creates an
+   `OffsetPageTable` for the active page-table hierarchy.
+7. `_start` prints compact memory diagnostics: the physical-memory offset,
+   selected virtual-to-physical translations, and the usable region count.
+8. `_start` executes `int3`, intentionally raising a breakpoint exception.
+9. The breakpoint handler prints the interrupt stack frame and returns.
+10. `_start` prints `Still alive after breakpoint`.
+11. `_start` enters `hlt_loop()` forever.
 
 Normal boot does not intentionally double fault or page fault. Those failures
 are tested only in separate integration test kernels.
 
 See [kernel_entry.md](code_walkthrough/kernel_entry.md) and
 [exceptions.md](code_walkthrough/exceptions.md) for the exact code.
+
+## Memory Management Foundation
+
+The current memory milestone uses the bootloader's direct physical-memory
+mapping instead of designing a final custom higher-half layout. With the
+`map_physical_memory` bootloader feature enabled, the bootloader maps all
+physical memory at a runtime virtual offset and stores that offset in
+`BootInfo::physical_memory_offset`.
+
+The current strategy is:
+
+- physical addresses are accessed as `physical_memory_offset + physical_address`
+- the active level-4 page table is found by reading `CR3`
+- the level-4 table's physical frame is accessed through the direct physical
+  mapping
+- `OffsetPageTable` edits the active hierarchy through that mapping
+- only regions marked `MemoryRegionType::Usable` are handed out by the early
+  frame allocator
+
+This is not yet the final virtual-memory layout. The kernel is not redesigning
+identity mapping, higher-half mapping, kernel/user separation, or heap layout in
+this milestone. Those decisions remain later work after the current page-table
+and frame-allocation basics are solid.
+
+The frame allocator is deliberately simple. It walks the bootloader memory map,
+turns usable regions into 4 KiB frames, and returns the `next` frame on each
+allocation. It never frees frames and is not efficient, but it is enough for
+early page-table work.
+
+See [memory.md](code_walkthrough/memory.md).
 
 ## Shared Library vs Boot Binary
 
@@ -80,6 +124,7 @@ The project has both `src/lib.rs` and `src/main.rs`.
 
 - `gdt`
 - `interrupts`
+- `memory`
 - `qemu`
 - `serial`
 - `vga_buffer`
@@ -175,16 +220,19 @@ The tests are harness-free bootable kernels:
 
 - `tests/stack_overflow.rs`
 - `tests/page_fault.rs`
+- `tests/memory_mapping.rs`
 
 They do not use Rust's normal test harness because this is a `no_std` kernel.
-Instead, each test file defines its own `_start`.
+Instead, each test file defines or generates its own `_start`.
 
 QEMU pass/fail is reported through the `isa-debug-exit` device. The kernel
 writes to I/O port `0xf4`; QEMU exits with a configured process status. Cargo
 treats status `33` as success because `0x10` becomes `(0x10 << 1) | 1`.
 
-Each test owns a test-local IDT so success behavior stays out of the production
-handlers.
+Each exception-oriented test owns a test-local IDT so success behavior stays out
+of the production handlers. The memory-mapping test also installs a test-local
+page-fault handler, but success comes from explicitly mapping one scratch page,
+writing through it, and reading the value back.
 
 See [tests.md](code_walkthrough/tests.md) and
 [build_config.md](code_walkthrough/build_config.md).
@@ -198,6 +246,7 @@ cargo +nightly check
 cargo +nightly bootimage
 cargo +nightly test --test stack_overflow
 cargo +nightly test --test page_fault
+cargo +nightly test --test memory_mapping
 ```
 
 Use this to boot the normal kernel:
@@ -211,13 +260,9 @@ there.
 
 ## Current Boundaries
 
-This documentation describes only the current CPU-exception milestone. It does
-not cover future memory management implementation because the kernel does not
-yet have:
+This documentation describes only the current CPU-exception and memory-foundation
+milestones. The kernel still does not have:
 
-- bootloader memory-map handling
-- page-table editing
-- physical frame allocation
 - heap allocation
 - hardware IRQ setup
 - scheduler or userspace

@@ -7,10 +7,12 @@ This page covers:
 
 - `tests/stack_overflow.rs`
 - `tests/page_fault.rs`
+- `tests/memory_mapping.rs`
 
-Both tests are full bootable kernels. They do not use Rust's normal test
-harness. Each file defines its own `_start`, installs a test-local IDT, triggers
-one controlled exception path, and exits QEMU only from the expected handler.
+These tests are full bootable kernels. They do not use Rust's normal test
+harness. Each file defines or generates its own `_start`, installs only the
+test-local setup it needs, triggers one controlled path, and exits QEMU only
+after the expected behavior.
 
 ## `tests/stack_overflow.rs`
 
@@ -115,3 +117,65 @@ handler. It intentionally reads from a canonical but likely unmapped address.
 | `hlt_loop();` | Halts if QEMU does not exit. |
 | `#[panic_handler]` | Defines panic behavior for this test kernel. |
 | `blog_os::qemu::test_panic_handler(info);` | Reports failure through serial and QEMU debug-exit. |
+
+## `tests/memory_mapping.rs`
+
+### Purpose
+
+This test proves that the kernel can create one new virtual mapping with the
+active page tables. It maps the same scratch virtual page used by the
+page-fault test, writes through it, reads the value back, and exits QEMU only
+after the write is verified.
+
+### Invariants
+
+- The test uses `bootloader::entry_point!` so it can receive `BootInfo`.
+- The scratch page must be unmapped before the test maps it.
+- The mapped frame must come from `BootInfoFrameAllocator`.
+- The mapping must be flushed before the virtual address is accessed.
+- Success is reported only after the volatile write/read round trip succeeds.
+
+### Line-By-Line
+
+| Code | Explanation |
+| --- | --- |
+| `#![no_std]` | The test kernel cannot use the Rust standard library. |
+| `#![no_main]` | The test provides a boot entry point instead of a Rust `main`. |
+| `#![feature(abi_x86_interrupt)]` | Enables the interrupt ABI for the test page-fault handler. |
+| `use core::panic::PanicInfo;` | Imports panic information for the test panic handler. |
+| `use blog_os::memory::BootInfoFrameAllocator;` | Imports the early physical frame allocator. |
+| `use blog_os::qemu::{exit_qemu, QemuExitCode};` | Imports QEMU pass/fail exit support. |
+| `use blog_os::{gdt, hlt_loop, memory, serial_print, serial_println};` | Imports shared setup, memory, halt behavior, and serial output. |
+| `use bootloader::{entry_point, BootInfo};` | Imports the typed boot entry macro and boot information structure. |
+| `use x86_64::{ ... };` | Imports CR2, IDT types, paging traits, page types, flags, and virtual addresses. |
+| `static mut TEST_IDT: InterruptDescriptorTable = ...;` | Stores the test-local IDT at a stable address. |
+| `entry_point!(test_kernel_main);` | Generates `_start` and verifies that `test_kernel_main` accepts `&'static BootInfo`. |
+| `fn test_kernel_main(boot_info: &'static BootInfo) -> !` | Defines the memory-mapping test entry point. |
+| `blog_os::serial::init();` | Configures COM1 before printing test output. |
+| `serial_print!("memory_mapping::map_one_page...\t");` | Prints the test name without a newline so `[ok]` appears beside it. |
+| `gdt::init();` | Initializes GDT/TSS setup before loading the test IDT. |
+| `init_test_idt();` | Loads a page-fault handler that reports failure if the mapping proof faults. |
+| `let physical_memory_offset = VirtAddr::new(boot_info.physical_memory_offset);` | Reads the runtime direct-map offset supplied by the bootloader. |
+| `let mut mapper = unsafe { memory::init(physical_memory_offset) };` | Creates a mapper for the active page tables. |
+| `let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };` | Creates the monotonic frame allocator from the bootloader memory map. |
+| `let page = Page::containing_address(VirtAddr::new(0x4444_4444_0000));` | Chooses the scratch virtual page, matching the address used by the page-fault test. |
+| `mapper.translate_addr(page.start_address()).is_none()` | Asserts that the scratch page was unmapped before this test creates the mapping. |
+| `frame_allocator.allocate_frame().expect(...)` | Allocates one fresh usable physical frame for the scratch page. |
+| `PageTableFlags::PRESENT | PageTableFlags::WRITABLE` | Makes the new page present and writable. |
+| `mapper.map_to(page, frame, flags, &mut frame_allocator)` | Adds the virtual-to-physical mapping, allocating intermediate page tables if needed. |
+| `.flush();` | Flushes the page from the TLB before using the new mapping. |
+| `let value = 0x_f021_f077_f065_f04e;` | Defines the known value used for the write/read proof. |
+| `let ptr: *mut u64 = page.start_address().as_mut_ptr();` | Converts the scratch virtual page start into a writable pointer. |
+| `core::ptr::write_volatile(ptr, value);` | Writes through the newly mapped virtual address without letting the compiler remove the access. |
+| `assert_eq!(core::ptr::read_volatile(ptr), value);` | Reads back through the same virtual address and verifies the mapping works. |
+| `serial_println!("[ok]");` | Reports success. |
+| `exit_qemu(QemuExitCode::Success);` | Exits QEMU with the configured success status. |
+| `hlt_loop();` | Halts forever if QEMU does not exit. |
+| `fn init_test_idt()` | Builds and loads the test-local IDT. |
+| `idt.page_fault.set_handler_fn(test_page_fault_handler);` | Installs a page-fault handler that marks the test failed. |
+| `extern "x86-interrupt" fn test_page_fault_handler(...)` | Handles unexpected page faults during the mapping proof. |
+| `let accessed_address = Cr2::read();` | Reads the faulting virtual address for diagnostics. |
+| `serial_println!("[failed]");` | Marks the unexpected page fault as a test failure. |
+| `exit_qemu(QemuExitCode::Failed);` | Exits QEMU with failure status. |
+| `#[panic_handler]` | Defines panic behavior for this test kernel. |
+| `blog_os::qemu::test_panic_handler(info);` | Reports assertion failures and other panics through serial and QEMU debug-exit. |

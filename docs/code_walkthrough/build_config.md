@@ -34,7 +34,7 @@ binary target, integration test kernels, and panic strategy.
 | `]` | Ends the QEMU test-args list. |
 | `test-success-exit-code = 33` | Tells bootimage that QEMU process exit code 33 means success. This corresponds to writing `0x10` to `isa-debug-exit`. |
 | `[dependencies]` | Starts runtime dependencies. |
-| `bootloader = "0.9"` | Provides the bootloader used by `cargo bootimage`. |
+| `bootloader = { version = "0.9", features = ["map_physical_memory"] }` | Provides the bootloader used by `cargo bootimage` and enables the direct physical-memory mapping plus `BootInfo::physical_memory_offset`. |
 | `x86_64 = "=0.14.7"` | Provides CPU instructions, registers, GDT/TSS/IDT types, and port I/O. The exact pin keeps the known API stable. |
 | `[[bin]]` | Declares the production kernel binary target. |
 | `name = "blog_os"` | Binary name. |
@@ -44,6 +44,8 @@ binary target, integration test kernels, and panic strategy.
 | `harness = false` | Disables Rust's test harness; the file is a bootable test kernel with `_start`. |
 | `[[test]] name = "page_fault"` | Declares the page-fault integration test target. |
 | `harness = false` | Makes the page-fault test a bootable kernel too. |
+| `[[test]] name = "memory_mapping"` | Declares the memory-mapping integration test target. |
+| `harness = false` | Makes the memory-mapping proof a bootable kernel with its own entry point. |
 | `[profile.dev] panic = "abort"` | Development builds abort on panic. There is no stack unwinding runtime. |
 | `[profile.release] panic = "abort"` | Release builds also abort on panic. |
 
