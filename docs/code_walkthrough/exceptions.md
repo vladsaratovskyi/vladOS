@@ -12,10 +12,12 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 
 - breakpoint exceptions
 - double faults
+- general-protection faults
 - page faults
 - timer IRQs
 - keyboard IRQs
 - the private software yield interrupt used by `scheduler::yield_now()`
+- the user-callable syscall interrupt on vector `0x80`
 
 ## Dependencies
 
@@ -28,6 +30,7 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 - `InterruptDescriptorTable` for IDT construction
 - `InterruptStackFrame` for saved CPU state passed to simple Rust handlers
 - `crate::arch::x86_64::context` for the low-level timer and yield stubs
+- `TrapFrameWithErrorCode` for decoding the explicit #GP entry frame
 - `PageFaultErrorCode` for CPU-supplied page-fault details
 - `crate::gdt` for the double-fault IST index
 - `crate::hlt_loop` for fatal handlers
@@ -38,6 +41,9 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 - The IDT must live at a stable address after `lidt`.
 - Simple exception and keyboard handlers use `extern "x86-interrupt"`.
 - The timer IRQ uses an explicit assembly stub because it may switch tasks.
+- The syscall and #GP paths use explicit assembly stubs so they can share the
+  scheduler's full trap-frame context model.
+- The syscall IDT entry must be DPL 3 so user code can execute `int 0x80`.
 - The PICs must be remapped away from CPU exception vectors before CPU
   interrupts are enabled.
 - Only IRQ0 and IRQ1 are unmasked at this milestone.
@@ -46,6 +52,7 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 - The double-fault handler must not return.
 - The page-fault handler currently must not return because the kernel cannot
   recover or map missing pages yet.
+- A #GP from CPL3 is task-local; a #GP from CPL0 remains fatal.
 
 ## Line-By-Line
 
@@ -60,27 +67,31 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 | `InterruptDescriptorTable` | The table that maps exception and interrupt vectors to handler functions. |
 | `InterruptStackFrame` | A snapshot of CPU state pushed for an exception: instruction pointer, code segment, flags, stack pointer, and stack segment. |
 | `PageFaultErrorCode` | A bitflag value pushed by the CPU for page faults. It explains the access type and cause. |
-| `use crate::arch::x86_64::context;` | Imports addresses for the explicit timer and yield interrupt entry stubs. |
+| `use crate::arch::x86_64::context::{self, TrapFrameWithErrorCode};` | Imports addresses for explicit interrupt entry stubs and the #GP frame layout with an error code. |
 | `use crate::{gdt, hlt_loop, println};` | Imports local kernel helpers: GDT constants, halt loop, and VGA output. |
+| `use x86_64::PrivilegeLevel;` | Imports DPL values so the syscall IDT entry can allow ring-3 callers. |
 | `pub const PIC_1_OFFSET: u8 = 32;` | Chooses vector 32 as the first hardware IRQ vector. CPU vectors `0..31` are reserved for exceptions, so remapping starts after them. |
 | `pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;` | Maps the secondary PIC directly after the primary PIC, giving vectors `40..47`. |
 | `pub const PIT_FREQUENCY_HZ: u32 = 100;` | Sets a simple 100 Hz timer rate for early ticks and the first preemptive scheduling quantum. There is still no sleep API or timekeeping abstraction. |
 | `pub const YIELD_VECTOR: u8 = PIC_2_OFFSET + 8;` | Reserves vector 48 for cooperative `yield_now()`. This is not a PIC IRQ; it is a private software interrupt. |
+| `crate::syscall::SYSCALL_VECTOR` | Reserves vector 128 for user `int 0x80` syscalls. |
 | `PIT_COMMAND_PORT`, `PIT_CHANNEL_0_PORT`, and `KEYBOARD_DATA_PORT` | Name the I/O ports used for PIT setup and raw keyboard scancode reads. |
 | `static PICS: Mutex<ChainedPics> = ...;` | Stores the remapped PIC pair behind a lock so initialization and EOI notifications serialize access to PIC command ports. |
 | `static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);` | Global monotonic counter incremented by the timer IRQ handler. |
 | `static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();` | Stores the production IDT at a stable global address. It is mutated during boot and then loaded. |
-| `pub enum InterruptIndex { ... }` | Gives names to the interrupt vectors the kernel currently handles: timer IRQ0, keyboard IRQ1, and the private software yield vector. |
+| `pub enum InterruptIndex { ... }` | Gives names to the interrupt vectors the kernel currently handles: timer IRQ0, keyboard IRQ1, private software yield, and syscall. |
 | `as_u8()` and `as_usize()` | Convert the enum into the forms needed by PIC EOI calls and IDT indexing. |
 | `pub fn init_idt() {` | Public function called by normal boot to initialize exception handling. |
 | `let idt = unsafe { &mut *core::ptr::addr_of_mut!(IDT) };` | Gets a mutable reference to the static IDT through a raw pointer. |
 | `idt.breakpoint.set_handler_fn(breakpoint_handler);` | Installs the vector 3 breakpoint handler. |
 | `idt.page_fault.set_handler_fn(page_fault_handler);` | Installs the vector 14 page-fault handler. |
+| `idt.general_protection_fault.set_handler_addr(...)` | Installs an explicit vector 13 entry so the kernel can inspect the saved CS and contain user-mode #GP faults. |
 | `unsafe { idt.double_fault ... }` | Configures the vector 8 double-fault handler and its IST stack. `set_stack_index` is unsafe because the index must be valid in the loaded TSS. |
 | `.set_handler_fn(double_fault_handler)` | Sets the double-fault handler function. |
 | `.set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);` | Tells the CPU to switch to the dedicated IST stack before calling the double-fault handler. |
 | `idt[InterruptIndex::Timer.as_usize()].set_handler_addr(...)` | Installs the explicit low-level IRQ0 entry stub. The timer path can switch tasks, so it cannot use a normal Rust `extern "x86-interrupt"` handler. |
 | `idt[InterruptIndex::Yield.as_usize()].set_handler_addr(...)` | Installs the low-level software-yield entry stub used by `scheduler::yield_now()`. |
+| `idt[InterruptIndex::Syscall.as_usize()].set_handler_addr(...).set_privilege_level(PrivilegeLevel::Ring3)` | Installs the user-callable `int 0x80` syscall gate. DPL 3 is what allows CPL3 code to invoke it without a #GP. |
 | `idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);` | Installs the handler for IRQ1 after PIC remapping. |
 | `idt.load();` | Executes `lidt` through the `x86_64` crate. After this, the CPU uses this IDT. |
 | `println!("IDT initialized");` | Prints confirmation after the IDT is active. |
@@ -127,7 +138,7 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 | `CAUSED_BY_WRITE` present | Means the faulting access was a write. |
 | `CAUSED_BY_WRITE` absent | Means the faulting access was a read. |
 | `fn page_fault_mode(...) -> &'static str` | Converts bit 2 into privilege-level meaning. |
-| `USER_MODE` present | Means the fault came from CPL 3 user mode. The current kernel does not have userspace yet. |
+| `USER_MODE` present | Means the fault came from CPL 3 user mode. Page faults are still fatal in this milestone; #GP has the first task-local user-fault policy. |
 | `USER_MODE` absent | Means the fault came from supervisor/kernel mode. |
 | `fn yes_no(value: bool) -> &'static str` | Small formatting helper for boolean page-fault details. |
 | `if value { "yes" } else { "no" }` | Converts a boolean into stable user-facing text. |
@@ -136,6 +147,10 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 | `crate::scheduler::on_timer_interrupt(frame_rsp)` | Lets the scheduler save the interrupted task and optionally choose another ready task when preemption is enabled. |
 | `notify_end_of_interrupt(InterruptIndex::Timer.as_u8())` | Sends exactly one EOI to the PIC before the selected context is restored. |
 | `pub extern "C" fn yield_interrupt_rust(frame_rsp: u64) -> u64` | Rust half of the software-yield path. It shares the scheduler switch logic but does not send PIC EOI because no device IRQ occurred. |
+| `pub extern "C" fn syscall_interrupt_rust(frame_rsp: u64) -> u64` | Rust half of the syscall interrupt path. It passes the saved trap frame to `syscall::dispatch`. |
+| `pub extern "C" fn general_protection_rust(frame_rsp: u64) -> u64` | Rust half of the explicit #GP path. It receives a frame that includes the CPU-pushed error code. |
+| `frame.cs & 0x3 == 0x3` | Checks whether the fault came from CPL3. User-mode #GP marks the current task failed and resumes another task. |
+| kernel-mode #GP branch | Prints diagnostics and halts. A kernel privileged-instruction or descriptor fault is still fatal. |
 | `extern "x86-interrupt" fn keyboard_interrupt_handler(...)` | Handles keyboard IRQ1. |
 | `Port::new(KEYBOARD_DATA_PORT).read()` | Reads one raw scancode byte from port `0x60`. Reading the data port acknowledges the keyboard controller side of the interrupt. |
 | `println!("keyboard scancode: {:#04x}", scancode);` | Logs the raw scancode for this milestone. Full key decoding is intentionally deferred. |

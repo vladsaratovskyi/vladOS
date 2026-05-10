@@ -1,5 +1,6 @@
 use crate::println;
 
+use x86_64::instructions::interrupts as cpu_interrupts;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::{PrivilegeLevel, VirtAddr};
@@ -11,6 +12,8 @@ const DOUBLE_FAULT_STACK_SIZE: usize = 4096 * 5;
 struct Selectors {
     code_selector: SegmentSelector,
     data_selector: SegmentSelector,
+    user_code_selector: SegmentSelector,
+    user_data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
 
@@ -24,6 +27,8 @@ static mut GDT: GlobalDescriptorTable = GlobalDescriptorTable::new();
 static mut SELECTORS: Selectors = Selectors {
     code_selector: SegmentSelector::new(0, PrivilegeLevel::Ring0),
     data_selector: SegmentSelector::new(0, PrivilegeLevel::Ring0),
+    user_code_selector: SegmentSelector::new(0, PrivilegeLevel::Ring3),
+    user_data_selector: SegmentSelector::new(0, PrivilegeLevel::Ring3),
     tss_selector: SegmentSelector::new(0, PrivilegeLevel::Ring0),
 };
 
@@ -54,6 +59,8 @@ fn init_gdt() {
     let gdt = unsafe { &mut *core::ptr::addr_of_mut!(GDT) };
     let code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
     let data_selector = gdt.add_entry(Descriptor::kernel_data_segment());
+    let user_data_selector = gdt.add_entry(Descriptor::user_data_segment());
+    let user_code_selector = gdt.add_entry(Descriptor::user_code_segment());
     let tss_selector = gdt.add_entry(Descriptor::tss_segment(unsafe {
         &*core::ptr::addr_of!(TSS)
     }));
@@ -62,6 +69,8 @@ fn init_gdt() {
         *core::ptr::addr_of_mut!(SELECTORS) = Selectors {
             code_selector,
             data_selector,
+            user_code_selector,
+            user_data_selector,
             tss_selector,
         };
     }
@@ -81,4 +90,40 @@ fn load_gdt() {
         SS::set_reg(selectors.data_selector);
         load_tss(selectors.tss_selector);
     }
+}
+
+pub fn kernel_code_selector() -> SegmentSelector {
+    unsafe { (*core::ptr::addr_of!(SELECTORS)).code_selector }
+}
+
+pub fn kernel_data_selector() -> SegmentSelector {
+    unsafe { (*core::ptr::addr_of!(SELECTORS)).data_selector }
+}
+
+pub fn user_code_selector() -> SegmentSelector {
+    with_rpl(
+        unsafe { (*core::ptr::addr_of!(SELECTORS)).user_code_selector },
+        PrivilegeLevel::Ring3,
+    )
+}
+
+pub fn user_data_selector() -> SegmentSelector {
+    with_rpl(
+        unsafe { (*core::ptr::addr_of!(SELECTORS)).user_data_selector },
+        PrivilegeLevel::Ring3,
+    )
+}
+
+pub fn set_kernel_stack(stack_top: VirtAddr) {
+    // A CPL3 -> CPL0 interrupt transition loads RSP from TSS.rsp0 before
+    // pushing the interrupt frame. This single-core kernel updates it while
+    // interrupts are disabled whenever the scheduler selects a new task.
+    cpu_interrupts::without_interrupts(|| unsafe {
+        (*core::ptr::addr_of_mut!(TSS)).privilege_stack_table[0] = stack_top;
+    });
+}
+
+fn with_rpl(mut selector: SegmentSelector, rpl: PrivilegeLevel) -> SegmentSelector {
+    selector.set_rpl(rpl);
+    selector
 }

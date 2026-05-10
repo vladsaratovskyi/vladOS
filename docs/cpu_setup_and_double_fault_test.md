@@ -7,9 +7,10 @@
 
 This note documents the earlier CPU setup milestone and the isolated QEMU tests
 that prove the double-fault and page-fault handlers work. The current kernel has
-since added paging, a fixed early heap, legacy PIC/PIT interrupts, and a
-stackful task foundation with optional PIT-driven preemption, but it is still
-small and educational on purpose: no APIC setup and no userspace.
+since added paging, a fixed early heap, legacy PIC/PIT interrupts, stackful
+tasks with optional PIT-driven preemption, and a minimal userspace foundation,
+but it is still small and educational on purpose: no APIC setup, separate user
+address spaces, or filesystem.
 
 ## Normal Boot Path
 
@@ -41,8 +42,11 @@ integration tests can reuse the same setup code.
 
 It exposes:
 
-- `gdt`: Global Descriptor Table, Task State Segment, and double-fault IST stack.
+- `gdt`: Global Descriptor Table, Task State Segment, double-fault IST stack,
+  user selectors, and `rsp0` updates.
 - `interrupts`: production IDT, CPU exception handlers, and legacy IRQ setup.
+- `syscall` and `user`: minimal `int 0x80` syscalls and tiny test user
+  programs.
 - `memory`: active page-table access and boot-info frame allocation.
 - `allocator`: fixed heap mapping and global allocator setup.
 - `task` and `scheduler`: stackful kernel tasks and round-robin scheduling.
@@ -64,6 +68,7 @@ needs valid code/data selectors and a TSS descriptor. The kernel creates:
 
 - a kernel code segment descriptor
 - a kernel data/stack segment descriptor
+- user code and data descriptors
 - a TSS descriptor
 - selectors for these descriptors
 

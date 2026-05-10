@@ -3,8 +3,10 @@ use core::arch::asm;
 
 use x86_64::instructions::interrupts as cpu_interrupts;
 use x86_64::registers::rflags;
+use x86_64::VirtAddr;
 
 use crate::arch::x86_64::context::{self, Context};
+use crate::gdt;
 use crate::task::{Task, TaskEntry, TaskId, TaskState, MAX_TASKS};
 use crate::{hlt_loop, println};
 
@@ -43,6 +45,29 @@ impl Scheduler {
         Ok(id)
     }
 
+    fn spawn_user(
+        &mut self,
+        entry_point: VirtAddr,
+        user_stack_top: VirtAddr,
+        arg0: u64,
+        initial_rflags: u64,
+    ) -> Result<TaskId, SpawnError> {
+        if self.tasks.len() >= MAX_TASKS {
+            return Err(SpawnError::Full);
+        }
+
+        let id = TaskId(self.tasks.len());
+        self.tasks.push(Task::new_user(
+            id,
+            entry_point,
+            user_stack_top,
+            arg0,
+            initial_rflags,
+        ));
+
+        Ok(id)
+    }
+
     fn next_ready_after(&self, start: usize) -> Option<usize> {
         if self.tasks.is_empty() {
             return None;
@@ -72,8 +97,22 @@ impl Scheduler {
             .count()
     }
 
+    fn failed_count(&self) -> usize {
+        self.tasks
+            .iter()
+            .filter(|task| task.state() == TaskState::Failed)
+            .count()
+    }
+
+    fn terminal_count(&self) -> usize {
+        self.tasks
+            .iter()
+            .filter(|task| matches!(task.state(), TaskState::Finished | TaskState::Failed))
+            .count()
+    }
+
     fn all_tasks_finished(&self) -> bool {
-        !self.tasks.is_empty() && self.finished_count() == self.tasks.len()
+        !self.tasks.is_empty() && self.terminal_count() == self.tasks.len()
     }
 
     fn save_current_frame(&mut self, frame_rsp: u64) -> Option<usize> {
@@ -99,8 +138,33 @@ impl Scheduler {
         self.tasks[current].set_state(TaskState::Ready);
         self.tasks[next].set_state(TaskState::Running);
         self.current = Some(next);
+        self.load_kernel_stack_for(next);
 
         self.tasks[next].saved_rsp()
+    }
+
+    fn finish_current_from_interrupt(&mut self, frame_rsp: u64, final_state: TaskState) -> u64 {
+        let current = self.current.expect("no current task");
+
+        self.tasks[current].set_saved_rsp(frame_rsp);
+        self.tasks[current].set_state(final_state);
+
+        if let Some(next) = self.next_ready_after(current) {
+            self.tasks[next].set_state(TaskState::Running);
+            self.current = Some(next);
+            self.load_kernel_stack_for(next);
+
+            self.tasks[next].saved_rsp()
+        } else {
+            self.current = None;
+
+            let main_context = core::ptr::addr_of!(self.main_context);
+            unsafe { context::restore_main(main_context) }
+        }
+    }
+
+    fn load_kernel_stack_for(&self, task_index: usize) {
+        gdt::set_kernel_stack(self.tasks[task_index].kernel_stack_top());
     }
 }
 
@@ -114,6 +178,22 @@ pub fn spawn(entry: TaskEntry) -> Result<TaskId, SpawnError> {
     cpu_interrupts::without_interrupts(|| unsafe { scheduler_mut().spawn(entry, initial_rflags) })
 }
 
+pub fn spawn_user(
+    entry_point: VirtAddr,
+    user_stack_top: VirtAddr,
+    arg0: u64,
+) -> Result<TaskId, SpawnError> {
+    let initial_rflags = if rflags::read().contains(rflags::RFlags::INTERRUPT_FLAG) {
+        0x202
+    } else {
+        0x2
+    };
+
+    cpu_interrupts::without_interrupts(|| unsafe {
+        scheduler_mut().spawn_user(entry_point, user_stack_top, arg0, initial_rflags)
+    })
+}
+
 pub fn run() {
     cpu_interrupts::without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
@@ -123,6 +203,7 @@ pub fn run() {
 
         scheduler.current = Some(next);
         scheduler.tasks[next].set_state(TaskState::Running);
+        scheduler.load_kernel_stack_for(next);
 
         let old_context = core::ptr::addr_of_mut!(scheduler.main_context);
         let new_context = scheduler.tasks[next].context();
@@ -157,6 +238,10 @@ pub fn finished_task_count() -> usize {
     cpu_interrupts::without_interrupts(|| unsafe { scheduler_mut().finished_count() })
 }
 
+pub fn failed_task_count() -> usize {
+    cpu_interrupts::without_interrupts(|| unsafe { scheduler_mut().failed_count() })
+}
+
 pub fn all_tasks_finished() -> bool {
     cpu_interrupts::without_interrupts(|| unsafe { scheduler_mut().all_tasks_finished() })
 }
@@ -166,7 +251,9 @@ pub(crate) fn run_current_task() -> ! {
         let scheduler = scheduler_mut();
         let current = scheduler.current.expect("no current task");
 
-        scheduler.tasks[current].entry()
+        scheduler.tasks[current]
+            .kernel_entry()
+            .expect("current task is not a kernel task")
     });
 
     entry();
@@ -189,6 +276,18 @@ pub(crate) fn on_yield_interrupt(frame_rsp: u64) -> u64 {
     unsafe { scheduler_mut().switch_from_interrupt(frame_rsp) }
 }
 
+pub(crate) fn on_syscall_yield(frame_rsp: u64) -> u64 {
+    unsafe { scheduler_mut().switch_from_interrupt(frame_rsp) }
+}
+
+pub(crate) fn exit_current_from_interrupt(frame_rsp: u64) -> u64 {
+    unsafe { scheduler_mut().finish_current_from_interrupt(frame_rsp, TaskState::Finished) }
+}
+
+pub(crate) fn fail_current_from_interrupt(frame_rsp: u64) -> u64 {
+    unsafe { scheduler_mut().finish_current_from_interrupt(frame_rsp, TaskState::Failed) }
+}
+
 fn finish_current_task() -> ! {
     cpu_interrupts::without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
@@ -199,6 +298,7 @@ fn finish_current_task() -> ! {
         if let Some(next) = scheduler.next_ready_after(current) {
             scheduler.tasks[next].set_state(TaskState::Running);
             scheduler.current = Some(next);
+            scheduler.load_kernel_stack_for(next);
 
             let new_context = scheduler.tasks[next].context();
             context::restore_task(new_context);

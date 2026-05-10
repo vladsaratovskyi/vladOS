@@ -12,7 +12,9 @@ pub mod memory;
 pub mod qemu;
 pub mod scheduler;
 pub mod serial;
+pub mod syscall;
 pub mod task;
+pub mod user;
 pub mod vga_buffer;
 
 pub fn hlt_loop() -> ! {

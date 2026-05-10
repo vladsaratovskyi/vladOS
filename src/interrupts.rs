@@ -5,8 +5,9 @@ use spin::Mutex;
 use x86_64::instructions::{interrupts as cpu_interrupts, port::Port};
 use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use x86_64::PrivilegeLevel;
 
-use crate::arch::x86_64::context;
+use crate::arch::x86_64::context::{self, TrapFrameWithErrorCode};
 use crate::{gdt, hlt_loop, println};
 
 pub const PIC_1_OFFSET: u8 = 32;
@@ -32,6 +33,7 @@ pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     Keyboard = PIC_1_OFFSET + 1,
     Yield = YIELD_VECTOR,
+    Syscall = crate::syscall::SYSCALL_VECTOR,
 }
 
 impl InterruptIndex {
@@ -51,6 +53,8 @@ pub fn init_idt() {
     idt.page_fault.set_handler_fn(page_fault_handler);
 
     unsafe {
+        idt.general_protection_fault
+            .set_handler_addr(context::general_protection_entry_addr());
         idt.double_fault
             .set_handler_fn(double_fault_handler)
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
@@ -61,6 +65,9 @@ pub fn init_idt() {
             .set_handler_addr(context::timer_interrupt_entry_addr());
         idt[InterruptIndex::Yield.as_usize()]
             .set_handler_addr(context::yield_interrupt_entry_addr());
+        idt[InterruptIndex::Syscall.as_usize()]
+            .set_handler_addr(context::syscall_interrupt_entry_addr())
+            .set_privilege_level(PrivilegeLevel::Ring3);
     }
 
     idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
@@ -214,6 +221,29 @@ pub extern "C" fn timer_interrupt_rust(frame_rsp: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn yield_interrupt_rust(frame_rsp: u64) -> u64 {
     crate::scheduler::on_yield_interrupt(frame_rsp)
+}
+
+#[no_mangle]
+pub extern "C" fn syscall_interrupt_rust(frame_rsp: u64) -> u64 {
+    crate::syscall::dispatch(frame_rsp)
+}
+
+#[no_mangle]
+pub extern "C" fn general_protection_rust(frame_rsp: u64) -> u64 {
+    let frame = unsafe { &*(frame_rsp as *const TrapFrameWithErrorCode) };
+
+    if frame.cs & 0x3 == 0x3 {
+        println!("EXCEPTION: USER GENERAL PROTECTION");
+        println!("Error code: {}", frame.error_code);
+        return crate::scheduler::fail_current_from_interrupt(frame_rsp);
+    }
+
+    println!("EXCEPTION: GENERAL PROTECTION");
+    println!("Error code: {}", frame.error_code);
+    println!("RIP: {:#018x}", frame.rip);
+    println!("CS: {:#06x}", frame.cs);
+
+    hlt_loop();
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {

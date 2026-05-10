@@ -5,10 +5,10 @@ is meant to be read before the line-by-line walkthroughs in
 [code_walkthrough/](code_walkthrough/README.md).
 
 The project is an educational `x86_64` Rust kernel. It is deliberately small:
-there is now a fixed early heap, a legacy PIC/PIT interrupt foundation, and a
-stackful kernel task foundation with both cooperative and PIT-driven preemptive
-switching. The current goal is still narrow: kernel tasks only, without jumping
-ahead to userspace, dynamic heap growth, or filesystems.
+there is now a fixed early heap, a legacy PIC/PIT interrupt foundation, a
+stackful task scheduler, and a minimal ring-3 userspace foundation. The current
+userspace step proves privilege transitions and syscalls only; separate address
+spaces, ELF loading, dynamic heap growth, and filesystems are still deferred.
 
 ## What Exists Today
 
@@ -20,6 +20,8 @@ The kernel currently has:
 - COM1 serial output for QEMU tests
 - QEMU debug-exit support for pass/fail integration tests
 - GDT and TSS initialization
+- ring-0 and ring-3 GDT selectors
+- TSS `rsp0` updates for user-to-kernel transitions
 - a dedicated double-fault IST stack
 - IDT initialization
 - handlers for breakpoint, double fault, and page fault exceptions
@@ -43,6 +45,10 @@ The kernel currently has:
 - a small round-robin scheduler with explicit `yield_now()` and opt-in
   preemption
 - an x86_64 full trap-frame context switch routine for interrupt-time switches
+- minimal user tasks entered through `iretq`
+- software-interrupt syscalls on vector `0x80`
+- user `yield` and `exit` syscalls
+- contained user-mode general-protection faults
 - one isolated double-fault test kernel
 - one isolated page-fault test kernel
 - one isolated memory-mapping test kernel
@@ -50,6 +56,7 @@ The kernel currently has:
 - one isolated interrupt-foundation test kernel
 - one isolated cooperative-task test kernel
 - one isolated preemptive-task test kernel
+- one isolated userspace test kernel
 
 For line-by-line details, start with
 [kernel_entry.md](code_walkthrough/kernel_entry.md).
@@ -160,6 +167,8 @@ The project has both `src/lib.rs` and `src/main.rs`.
 - `allocator`
 - `task`
 - `scheduler`
+- `syscall`
+- `user`
 - `arch`
 - `memory`
 - `qemu`
@@ -180,7 +189,8 @@ segmentation is disabled. The CPU still needs valid code and stack/data
 selectors, and it uses a TSS descriptor to find the Task State Segment.
 
 The Task State Segment is not used for old-style hardware task switching here.
-Instead, it provides an Interrupt Stack Table entry for double faults.
+Instead, it provides an Interrupt Stack Table entry for double faults and the
+`rsp0` stack pointer used when an interrupt or exception arrives from CPL3.
 
 The kernel allocates a five-page emergency stack and stores its top address in:
 
@@ -195,32 +205,45 @@ When a double fault occurs, the CPU switches to that emergency stack before it
 calls the double-fault handler. This prevents a stack overflow from immediately
 becoming a triple fault reset.
 
+The GDT also contains ring-3 user code and data descriptors. User task frames
+use those selectors with RPL 3. Whenever the scheduler selects a task, it writes
+that task's kernel-stack top into `TSS.rsp0`. If a user task takes a timer IRQ,
+syscall interrupt, or user-mode fault, the CPU switches to that kernel stack
+before the low-level stub saves registers.
+
 See [cpu_tables.md](code_walkthrough/cpu_tables.md).
 
 ## IDT And Exception Handlers
 
 The Interrupt Descriptor Table maps exception and interrupt vectors to handler
-functions. The current production IDT installs these CPU exception entries:
+functions. The current production IDT installs these exception and software
+interrupt entries:
 
 - vector 3: breakpoint
 - vector 8: double fault
+- vector 13: general protection
 - vector 14: page fault
+- vector 128: software-interrupt syscall
 
-All handlers use `extern "x86-interrupt"`. This ABI tells Rust to generate the
-right function prologue and epilogue for CPU exceptions. Ordinary Rust calls use
-`ret`; interrupt handlers must restore CPU state with the interrupt-return path.
+Simple handlers use `extern "x86-interrupt"`. This ABI tells Rust to generate
+the right function prologue and epilogue for CPU exceptions. Paths that can
+switch tasks or need the full trap-frame layout use explicit assembly stubs and
+return through the shared interrupt-return path.
 
 The breakpoint handler returns normally because `int3` is a recoverable
-exception. The double-fault handler and page-fault handler halt because this
-kernel cannot recover from them yet.
+exception. The double-fault handler and kernel page-fault path halt because this
+kernel cannot recover from them yet. General-protection faults are fatal in
+kernel mode, but a #GP from CPL3 marks only the current user task failed and
+lets the scheduler continue.
 
 See [exceptions.md](code_walkthrough/exceptions.md).
 
 ## Legacy Hardware Interrupt Foundation
 
 The current hardware interrupt path uses the legacy 8259 Programmable Interrupt
-Controllers and PIT first. This is intentionally simple and matches the roadmap
-step before APIC, scheduling, or userspace work.
+Controllers and PIT first. This remains intentionally simple while later
+milestones build scheduling and userspace on top of it before any APIC
+migration.
 
 The legacy PICs deliver hardware IRQs to CPU interrupt vectors. Their default
 mapping overlaps CPU exception vectors, so the kernel remaps them before
@@ -259,21 +282,21 @@ input queues yet.
 
 See [exceptions.md](code_walkthrough/exceptions.md) for the handler code.
 
-## Kernel Tasks
+## Tasks
 
-The task foundation is stackful. A task is a kernel function plus scheduler
-metadata:
+The task foundation is stackful. A task is either a kernel function or a tiny
+user entry point plus scheduler metadata:
 
 - a `TaskId`
-- a `TaskState`: `Ready`, `Running`, or `Finished`
+- a `TaskState`: `Ready`, `Running`, `Finished`, or `Failed`
 - a saved CPU `Context`
 - a dedicated heap-backed kernel stack
-- a task entry function
+- either a kernel task entry function or user entry/stack metadata
 
-Each task gets an 8 KiB stack. That size is deliberately small because the
-current heap is only 100 KiB and this milestone caps the initial task table at
-four tasks. It is enough for the current demo and QEMU test, but it is not a
-final stack-sizing policy.
+Each task gets an 8 KiB kernel stack. That size is deliberately small because
+the current heap is only 100 KiB and this milestone caps the initial task table
+at four tasks. For user tasks, this stack is also the ring-0 entry stack named
+by `TSS.rsp0`; the user stack is mapped separately in user-accessible pages.
 
 New task stacks are prepared with an interrupt-return frame that enters a task
 trampoline. The trampoline calls the current task entry function. When that
@@ -310,8 +333,9 @@ The timer scheduling flow is:
 
 1. PIT channel 0 asserts IRQ0.
 2. The remapped PIC delivers vector 32.
-3. The CPU enters the IDT entry and pushes `rip`, `cs`, `rflags`, `rsp`, and
-   `ss`.
+3. The CPU enters the IDT entry and pushes the interrupt return state. If the
+   interrupted task was in CPL3, it first switches to `TSS.rsp0` and includes
+   the old user `rsp` and `ss`.
 4. The low-level timer stub saves all general-purpose registers.
 5. Rust increments the tick counter, optionally records the interrupted task
    frame, and chooses the next ready task.
@@ -319,6 +343,49 @@ The timer scheduling flow is:
 7. Assembly restores the selected trap frame and returns through `iretq`.
 
 See [tasks.md](code_walkthrough/tasks.md).
+
+## Userspace Foundation
+
+The first userspace milestone does not add a process model. User tasks share
+the current page table with the kernel, and the test maps only the tiny user
+code aliases, marker page, and user stacks with `USER_ACCESSIBLE`. This proves
+ring separation before address-space isolation.
+
+User task creation builds an initial `TrapFrame` on the task's kernel stack:
+
+- `rip`: user entry point
+- `cs`: ring-3 user code selector with RPL 3
+- `rflags`: reserved bit set and interrupts enabled when the task was spawned
+- `rsp`: top of the mapped user stack
+- `ss`: ring-3 user data selector with RPL 3
+
+The scheduler restores that frame through the same `iretq` path used by
+preemptive task switching. There is no separate entry mechanism for the first
+CPL3 transition.
+
+Syscalls use `int 0x80` for this milestone. The IDT entry is present at DPL 3,
+so user code may invoke it directly. The low-level syscall stub saves the same
+full trap frame as timer/yield, then Rust dispatch reads the syscall number from
+`rax`:
+
+- `0`: yield through the scheduler's existing switch path
+- `1`: mark the current task finished and schedule another task
+
+This is intentionally not `syscall/sysret`; software interrupts reuse the
+kernel's current trap-frame machinery and keep this step focused on safe
+privilege transitions.
+
+A user-mode privileged instruction such as `hlt` raises #GP. The kernel checks
+the saved `cs` privilege bits. If the fault came from CPL3, the current task is
+marked `Failed` and another ready task is resumed. If the same exception came
+from CPL0, the kernel preserves the fatal behavior and halts.
+
+Timer IRQs can also arrive while user code is running. The CPU uses the current
+task's `TSS.rsp0` to enter ring 0, the timer stub saves the interrupted frame,
+and the scheduler may resume a kernel task, another user task, or the same task
+later.
+
+See [userspace.md](code_walkthrough/userspace.md).
 
 ## Page Fault Reporting
 
@@ -372,6 +439,7 @@ The tests are harness-free bootable kernels:
 - `tests/interrupts.rs`
 - `tests/cooperative_tasks.rs`
 - `tests/preemptive_tasks.rs`
+- `tests/userspace.rs`
 
 They do not use Rust's normal test harness because this is a `no_std` kernel.
 Instead, each test file defines or generates its own `_start`.
@@ -394,6 +462,9 @@ yield ordering, checks that task-local state survives context switches, and
 exits QEMU after both tasks finish. The preemptive task test enables PIT-driven
 preemption, runs two tasks that do not call `yield_now()` during the proof, and
 exits only after both task-local counters make progress and one task finishes.
+The userspace test maps tiny user code aliases and user stacks, enters CPL3,
+checks `yield` and `exit` syscalls, contains a user-mode privileged-instruction
+fault, and proves a busy user loop can be preempted by the PIT.
 
 See [tests.md](code_walkthrough/tests.md) and
 [build_config.md](code_walkthrough/build_config.md).
@@ -412,6 +483,7 @@ cargo +nightly test --test heap_allocation
 cargo +nightly test --test interrupts
 cargo +nightly test --test cooperative_tasks
 cargo +nightly test --test preemptive_tasks
+cargo +nightly test --test userspace
 ```
 
 Use this to boot the normal kernel:
@@ -426,13 +498,15 @@ there.
 ## Current Boundaries
 
 This documentation describes only the current CPU-exception, memory-foundation,
-legacy interrupt-foundation, and kernel task-foundation milestones. The
-kernel still does not have:
+legacy interrupt-foundation, task, and minimal userspace milestones. The kernel
+still does not have:
 
 - heap growth or physical frame reclamation
 - APIC setup
 - kernel stack guard pages
-- userspace
+- separate user address spaces
+- ELF loading
+- a broad syscall API
 - keyboard decoding or input queues
 
 Those belong to later roadmap steps in [GENERAL_PLAN.md](../GENERAL_PLAN.md).

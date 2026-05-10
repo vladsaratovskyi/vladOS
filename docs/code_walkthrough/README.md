@@ -15,13 +15,15 @@ Read order:
 5. [allocator.md](allocator.md): `src/allocator.rs`
 6. [tasks.md](tasks.md): `src/task.rs`, `src/scheduler.rs`, and
    `src/arch/x86_64/context.rs`
-7. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
+7. [userspace.md](userspace.md): `src/user.rs`, `src/syscall.rs`, and the
+   ring-3 pieces of `src/gdt.rs`, `src/interrupts.rs`, and the scheduler
+8. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
    `src/serial.rs`, and `src/qemu.rs`
-8. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
+9. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
    `tests/memory_mapping.rs`, `tests/heap_allocation.rs`, and
    `tests/interrupts.rs`, `tests/cooperative_tasks.rs`, and
-   `tests/preemptive_tasks.rs`
-9. [build_config.md](build_config.md): `Cargo.toml`, `.cargo/config.toml`,
+   `tests/preemptive_tasks.rs`, and `tests/userspace.rs`
+10. [build_config.md](build_config.md): `Cargo.toml`, `.cargo/config.toml`,
    `x86_64-vlad_os.json`, and `rust-toolchain.toml`
 
 ## How To Read The Tables

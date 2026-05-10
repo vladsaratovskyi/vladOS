@@ -52,6 +52,10 @@ harness = false
 name = "preemptive_tasks"
 harness = false
 
+[[test]]
+name = "userspace"
+harness = false
+
 [profile.dev]
 panic = "abort"
 

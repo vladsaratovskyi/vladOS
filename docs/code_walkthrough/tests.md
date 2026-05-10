@@ -12,6 +12,7 @@ This page covers:
 - `tests/interrupts.rs`
 - `tests/cooperative_tasks.rs`
 - `tests/preemptive_tasks.rs`
+- `tests/userspace.rs`
 
 These tests are full bootable kernels. They do not use Rust's normal test
 harness. Each file defines or generates its own `_start`, installs only the
@@ -345,3 +346,48 @@ requires both task-local counters to make progress and one task to finish.
 | `task_b()` | Busy-loops with its own local counter and exits QEMU successfully only after task A finished and both counters reached the target. |
 | no `scheduler::yield_now()` calls | Ensures success depends on timer preemption, not cooperative switching. |
 | `#[panic_handler]` | Reports assertion failures through serial and QEMU debug-exit. |
+
+## `tests/userspace.rs`
+
+### Purpose
+
+This test proves the first userspace foundation: a task enters CPL3 through an
+`iretq` frame, returns to the kernel with `int 0x80`, exits by syscall, contains
+a user-mode privileged-instruction fault, and can be preempted by the PIT while
+running in user mode.
+
+### Invariants
+
+- The production GDT, TSS, IDT, PIC, PIT, heap, scheduler, syscall, and user
+  mapping helpers are used together.
+- User code never calls kernel scheduler functions directly.
+- User code and stacks are mapped with `USER_ACCESSIBLE`.
+- Success depends on deterministic marker writes and scheduler state.
+- The privileged `hlt` fault must terminate only the user task, not the kernel.
+
+### Line-By-Line
+
+| Code | Explanation |
+| --- | --- |
+| `static YIELD_EXIT_ENTRY`, `FAULT_ENTRY`, `BUSY_ENTRY` | Publish mapped user entry addresses to the orchestrator task after setup. |
+| `static USER_STACK_0`, `USER_STACK_1`, `USER_STACK_2` | Store the mapped user-stack tops for the three user tasks in the test. |
+| `static MARKER_PAGE` | Stores the user-accessible marker page pointer passed to user code in `rdi`. |
+| `gdt::init(); interrupts::init_idt(); interrupts::init_pics(); interrupts::init_pit();` | Builds the real descriptor, syscall, and timer paths needed for ring transitions. |
+| `allocator::init_heap(...)` | Maps the fixed heap before task stack allocation. |
+| `user::map_user_marker_page(...)` | Maps one writable user page used for deterministic proof markers. |
+| `user::map_user_program(... YieldThenExit)` | Maps a user-accessible alias for the tiny assembly program that yields and exits through `int 0x80`. |
+| `user::map_user_program(... PrivilegedHlt)` | Maps a user program that attempts privileged `hlt`, expecting a contained #GP. |
+| `user::map_user_program(... BusyCounter)` | Maps a user program that increments forever and never voluntarily yields. |
+| `user::map_user_stack(...)` | Maps separate 8 KiB user stacks for the user tasks. |
+| `interrupts::enable_interrupts();` | Enables timer delivery before spawning tasks, so user frames can run with IF set. |
+| `scheduler::spawn(orchestrator)` | Creates the kernel task that checks every userspace scenario. |
+| `scheduler::spawn_user(yield_exit, stack_0, marker_page.as_u64())` | Creates the first user task with the marker page in `rdi`. |
+| `scheduler::yield_now()` in `orchestrator` | Gives the user task a chance to run and then expects the user syscall yield to switch back. |
+| marker checks after first yield | Prove user code ran before the syscall and had not yet executed the post-yield marker. |
+| marker checks after second yield | Prove the syscall returned to user mode and syscall exit marked the task finished. |
+| spawning the faulting user task | Starts a second user task after the first one exited, staying within the four-task limit. |
+| `scheduler::failed_task_count()` | Verifies the user #GP path marked only that task failed. |
+| spawning the busy user task | Starts a user loop that cannot return control by cooperative yield. |
+| `scheduler::enable_preemption(); scheduler::yield_now();` | Gives the busy user task the CPU; the orchestrator can resume only through a timer preemption from CPL3. |
+| `timer_ticks() > start_ticks` and busy marker check | Prove the PIT fired while user code was running and that the busy task made progress. |
+| `serial_println!("[ok]"); exit_qemu(...)` | Reports success only after all userspace checks pass. |

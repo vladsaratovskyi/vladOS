@@ -12,7 +12,7 @@ pub struct Context {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TrapFrame {
-    // Pushed by `timer_interrupt_entry` and `yield_interrupt_entry`.
+    // Pushed by the low-level interrupt entries in this file.
     pub r15: u64,
     pub r14: u64,
     pub r13: u64,
@@ -28,7 +28,37 @@ pub struct TrapFrame {
     pub rcx: u64,
     pub rbx: u64,
     pub rax: u64,
-    // Pushed by the CPU on interrupt entry and consumed by `iretq`.
+    // CPU return state. `rip`, `cs`, and `rflags` are always consumed by
+    // `iretq`; `rsp` and `ss` are consumed when returning across privilege
+    // levels and are also present in synthetic task-start frames.
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct TrapFrameWithErrorCode {
+    // Same manually saved register order as `TrapFrame`.
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rbx: u64,
+    pub rax: u64,
+    // Pushed by the CPU for exceptions such as #GP before the iret frame.
+    pub error_code: u64,
     pub rip: u64,
     pub cs: u64,
     pub rflags: u64,
@@ -75,6 +105,56 @@ impl Context {
                 rflags: rflags | 0x2,
                 rsp: initial_rsp as u64,
                 ss: SS::get_reg().0 as u64,
+            });
+        }
+
+        Self {
+            rsp: frame_bottom as u64,
+        }
+    }
+
+    pub unsafe fn new_user_task(
+        stack: &mut [u8],
+        entry_point: u64,
+        user_stack_top: u64,
+        user_code_selector: u16,
+        user_data_selector: u16,
+        rflags: u64,
+        arg0: u64,
+    ) -> Self {
+        const STACK_ALIGN: usize = 16;
+
+        let kernel_stack_top = stack.as_mut_ptr() as usize + stack.len();
+        let kernel_stack_top = kernel_stack_top & !(STACK_ALIGN - 1);
+        let frame_bottom = kernel_stack_top - core::mem::size_of::<TrapFrame>();
+        let user_rsp = (user_stack_top as usize & !(STACK_ALIGN - 1)) - core::mem::size_of::<u64>();
+        let frame = frame_bottom as *mut TrapFrame;
+
+        // User tasks also start through `restore_interrupt_context`: the
+        // scheduler selects this frame and `iretq` performs the first CPL3
+        // transition using the ring-3 CS/SS and user stack below.
+        unsafe {
+            frame.write(TrapFrame {
+                r15: 0,
+                r14: 0,
+                r13: 0,
+                r12: 0,
+                r11: 0,
+                r10: 0,
+                r9: 0,
+                r8: 0,
+                rsi: 0,
+                rdi: arg0,
+                rbp: 0,
+                rdx: 0,
+                rcx: 0,
+                rbx: 0,
+                rax: 0,
+                rip: entry_point,
+                cs: user_code_selector as u64,
+                rflags: rflags | 0x2,
+                rsp: user_rsp as u64,
+                ss: user_data_selector as u64,
             });
         }
 
@@ -133,9 +213,10 @@ restore_main_context:
     .global timer_interrupt_entry
     .type timer_interrupt_entry, @function
 timer_interrupt_entry:
-    // The CPU has already pushed rip, cs, rflags, rsp, and ss. Save all
-    // general-purpose registers because timer preemption can happen between
-    // any two instructions, not only at a function-call boundary.
+    // The CPU has already pushed the interrupt return state. From CPL3 it also
+    // switched to TSS.rsp0 and pushed the old user rsp/ss. Save all
+    // general-purpose registers because timer preemption can happen between any
+    // two instructions, not only at a function-call boundary.
     push rax
     push rbx
     push rcx
@@ -194,6 +275,68 @@ yield_interrupt_entry:
     jmp restore_interrupt_context
     .size yield_interrupt_entry, . - yield_interrupt_entry
 
+    .global syscall_interrupt_entry
+    .type syscall_interrupt_entry, @function
+syscall_interrupt_entry:
+    // Software interrupt syscall entry uses the same saved context shape as
+    // timer/yield. From CPL3 the CPU first switches to TSS.rsp0, then pushes
+    // ss, rsp, rflags, cs, and rip for `iretq`.
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rbp
+    push rdi
+    push rsi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cld
+    mov rdi, rsp
+    mov rbp, rsp
+    and rsp, -16
+    call syscall_interrupt_rust
+    mov rsp, rax
+    jmp restore_interrupt_context
+    .size syscall_interrupt_entry, . - syscall_interrupt_entry
+
+    .global general_protection_entry
+    .type general_protection_entry, @function
+general_protection_entry:
+    // #GP includes a CPU-pushed error code before the iret frame. Rust only
+    // returns from this stub after choosing a different normal `TrapFrame`;
+    // the faulting error-code frame is never restored.
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rbp
+    push rdi
+    push rsi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cld
+    mov rdi, rsp
+    mov rbp, rsp
+    and rsp, -16
+    call general_protection_rust
+    mov rsp, rax
+    jmp restore_interrupt_context
+    .size general_protection_entry, . - general_protection_entry
+
 restore_interrupt_context:
     pop r15
     pop r14
@@ -220,6 +363,8 @@ extern "C" {
     fn restore_main_context(main_context: *const Context) -> !;
     fn timer_interrupt_entry();
     fn yield_interrupt_entry();
+    fn syscall_interrupt_entry();
+    fn general_protection_entry();
 }
 
 pub unsafe fn switch_from_main(old_context: *mut Context, new_context: *const Context) {
@@ -242,4 +387,12 @@ pub fn timer_interrupt_entry_addr() -> VirtAddr {
 
 pub fn yield_interrupt_entry_addr() -> VirtAddr {
     VirtAddr::new(yield_interrupt_entry as *const () as u64)
+}
+
+pub fn syscall_interrupt_entry_addr() -> VirtAddr {
+    VirtAddr::new(syscall_interrupt_entry as *const () as u64)
+}
+
+pub fn general_protection_entry_addr() -> VirtAddr {
+    VirtAddr::new(general_protection_entry as *const () as u64)
 }

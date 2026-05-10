@@ -15,6 +15,8 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - direct VGA text output at `0xb8000`
 - serial output for QEMU tests
 - GDT and TSS initialization
+- ring-0 and ring-3 GDT selectors
+- TSS `rsp0` update for user-to-kernel interrupt transitions
 - dedicated IST stack for double faults
 - IDT initialization
 - breakpoint exception handler
@@ -39,6 +41,10 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - round-robin scheduler with explicit `yield_now()` and optional preemption
 - x86_64 trap-frame context switch that saves general-purpose registers and
   returns through the interrupt-return path
+- minimal ring-3 user task foundation using the current trap-frame restore path
+- interrupt-based syscall path on vector `0x80`
+- user syscalls for `yield` and `exit`
+- contained user-mode general-protection fault handling
 - one-page virtual mapping proof in an isolated QEMU integration test
 - isolated QEMU integration test for the double-fault path
 - isolated QEMU integration test for the page-fault path
@@ -47,7 +53,10 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - isolated QEMU integration test for PIC/PIT interrupt setup
 - isolated QEMU integration test for cooperative task switching
 - isolated QEMU integration test for PIT-driven preemptive task switching
-- no APIC, heap growth, userspace, or filesystem
+- isolated QEMU integration test for ring-3 entry, syscalls, user exit, user
+  fault containment, and timer preemption from user mode
+- no APIC, separate user address spaces, ELF loading, heap growth, or
+  filesystem
 
 Documentation entry points:
 
@@ -113,6 +122,8 @@ interrupts print raw scancodes. It then starts a short cooperative task demo
 where two stackful kernel tasks print progress and voluntarily yield to each
 other before the kernel enters `hlt_loop()`. Timer-driven preemption is
 available but remains opt-in; the normal boot path keeps the demo output quiet.
+The minimal userspace path is covered by an isolated QEMU test instead of the
+normal boot demo.
 
 ## Tests
 
@@ -158,6 +169,12 @@ Run the isolated preemptive-task QEMU test:
 cargo +nightly test --test preemptive_tasks
 ```
 
+Run the isolated userspace QEMU test:
+
+```powershell
+cargo +nightly test --test userspace
+```
+
 Expected serial output:
 
 ```text
@@ -168,6 +185,7 @@ heap_allocation::heap_allocations... [ok]
 interrupts::pic_pit_foundation...    [ok]
 cooperative_tasks::round_robin_yield... [ok]
 preemptive_tasks::timer_preemption...    [ok]
+userspace::ring3_syscalls_and_faults...  [ok]
 ```
 
 The normal kernel boot does not intentionally double fault or page fault. These
@@ -189,6 +207,7 @@ cargo +nightly test --test heap_allocation
 cargo +nightly test --test interrupts
 cargo +nightly test --test cooperative_tasks
 cargo +nightly test --test preemptive_tasks
+cargo +nightly test --test userspace
 ```
 
 `cargo +nightly run` boots the normal kernel in QEMU. It does not exit on its
