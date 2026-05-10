@@ -1,5 +1,5 @@
 [package]
-name = "blog_os"
+name = "vlad_os"
 version = "0.1.0"
 edition = "2021"
 
@@ -13,11 +13,14 @@ test-args = [
 test-success-exit-code = 33
 
 [dependencies]
-bootloader = "0.9"
+bootloader = { version = "0.9", features = ["map_physical_memory"] }
+linked_list_allocator = "0.10.6"
+pic8259 = "0.10.2"
+spin = "0.9.8"
 x86_64 = "=0.14.7"
 
 [[bin]]
-name = "blog_os"
+name = "vlad_os"
 path = "src/main.rs"
 test = false
 
@@ -27,6 +30,22 @@ harness = false
 
 [[test]]
 name = "page_fault"
+harness = false
+
+[[test]]
+name = "memory_mapping"
+harness = false
+
+[[test]]
+name = "heap_allocation"
+harness = false
+
+[[test]]
+name = "interrupts"
+harness = false
+
+[[test]]
+name = "cooperative_tasks"
 harness = false
 
 [profile.dev]

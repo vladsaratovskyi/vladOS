@@ -43,7 +43,7 @@ This page covers `src/gdt.rs`.
 | `use x86_64::structures::tss::TaskStateSegment;` | Imports the TSS type. In long mode, the TSS is mainly useful for stack switching through IST entries. |
 | `use x86_64::{PrivilegeLevel, VirtAddr};` | Imports privilege levels for placeholder selectors and virtual-address helpers for stack addresses. |
 | `pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;` | Defines IST slot 0 as the double-fault stack. Tests and the IDT use the same constant. |
-| `const DOUBLE_FAULT_STACK_SIZE: usize = 4096 * 5;` | Allocates five pages for the emergency double-fault stack. This mirrors the classic blog_os teaching setup. |
+| `const DOUBLE_FAULT_STACK_SIZE: usize = 4096 * 5;` | Allocates five pages for the emergency double-fault stack. This mirrors the classic Writing an OS in Rust teaching setup. |
 | `struct Selectors { ... }` | Stores the GDT selectors returned when entries are inserted. We need them later to load `CS` and the TSS. |
 | `code_selector: SegmentSelector,` | Selector for the kernel code segment descriptor. |
 | `tss_selector: SegmentSelector,` | Selector for the TSS descriptor. |

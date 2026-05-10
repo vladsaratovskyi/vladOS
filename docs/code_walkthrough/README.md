@@ -9,12 +9,19 @@ Read order:
 
 1. [kernel_entry.md](kernel_entry.md): `src/main.rs` and `src/lib.rs`
 2. [cpu_tables.md](cpu_tables.md): `src/gdt.rs`
-3. [exceptions.md](exceptions.md): `src/interrupts.rs`
-4. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
+3. [exceptions.md](exceptions.md): `src/interrupts.rs`, including CPU
+   exceptions and legacy hardware IRQs
+4. [memory.md](memory.md): `src/memory.rs`
+5. [allocator.md](allocator.md): `src/allocator.rs`
+6. [tasks.md](tasks.md): `src/task.rs`, `src/scheduler.rs`, and
+   `src/arch/x86_64/context.rs`
+7. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
    `src/serial.rs`, and `src/qemu.rs`
-5. [tests.md](tests.md): `tests/stack_overflow.rs` and `tests/page_fault.rs`
-6. [build_config.md](build_config.md): `Cargo.toml`, `.cargo/config.toml`,
-   `x86_64-blog_os.json`, and `rust-toolchain.toml`
+8. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
+   `tests/memory_mapping.rs`, `tests/heap_allocation.rs`, and
+   `tests/interrupts.rs`, and `tests/cooperative_tasks.rs`
+9. [build_config.md](build_config.md): `Cargo.toml`, `.cargo/config.toml`,
+   `x86_64-vlad_os.json`, and `rust-toolchain.toml`
 
 ## How To Read The Tables
 

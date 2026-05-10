@@ -14,9 +14,9 @@ struct Selectors {
 }
 
 // These CPU tables and the emergency stack must live at stable addresses for
-// as long as the processor can reference them. This early kernel has no heap or
-// once-initialization primitive yet, so `static mut` keeps the storage explicit;
-// all mutation happens during single-threaded boot before the tables are used.
+// as long as the processor can reference them. GDT setup also runs before heap
+// initialization, so `static mut` keeps the storage explicit; all mutation
+// happens during single-threaded boot before the tables are used.
 static mut DOUBLE_FAULT_STACK: [u8; DOUBLE_FAULT_STACK_SIZE] = [0; DOUBLE_FAULT_STACK_SIZE];
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 static mut GDT: GlobalDescriptorTable = GlobalDescriptorTable::new();
@@ -51,8 +51,9 @@ fn init_gdt() {
     // valid code segment and uses a TSS descriptor for IST stack switching.
     let gdt = unsafe { &mut *core::ptr::addr_of_mut!(GDT) };
     let code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
-    let tss_selector =
-        gdt.add_entry(Descriptor::tss_segment(unsafe { &*core::ptr::addr_of!(TSS) }));
+    let tss_selector = gdt.add_entry(Descriptor::tss_segment(unsafe {
+        &*core::ptr::addr_of!(TSS)
+    }));
 
     unsafe {
         *core::ptr::addr_of_mut!(SELECTORS) = Selectors {

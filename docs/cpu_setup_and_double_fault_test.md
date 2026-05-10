@@ -5,10 +5,11 @@
 > [code_walkthrough/](code_walkthrough/README.md). This file is kept as a
 > milestone note for the CPU exception work.
 
-This note documents the current early CPU setup milestone and the isolated QEMU
-tests that prove the double-fault and page-fault handlers work. The kernel is
-still small and educational on purpose: no heap, no paging changes, no hardware
-IRQs, no PIC or APIC setup, and no scheduler.
+This note documents the earlier CPU setup milestone and the isolated QEMU tests
+that prove the double-fault and page-fault handlers work. The current kernel has
+since added paging, a fixed early heap, legacy PIC/PIT interrupts, and a
+cooperative task foundation, but it is still small and educational on purpose:
+no APIC setup, no timer-driven preemption, and no userspace.
 
 ## Normal Boot Path
 
@@ -16,13 +17,18 @@ The normal kernel entry point is `src/main.rs::_start`.
 
 Boot flow:
 
-1. Print `Hello from Rust OS!` through VGA text mode.
+1. Print `Hello from vladOS!` through VGA text mode.
 2. Call `gdt::init()`.
 3. Call `interrupts::init_idt()`.
-4. Trigger one breakpoint exception with `x86_64::instructions::interrupts::int3()`.
-5. Return from the breakpoint handler.
-6. Print `Still alive after breakpoint`.
-7. Halt forever in `hlt_loop()`.
+4. Build the active page-table mapper from bootloader `BootInfo`.
+5. Print memory diagnostics.
+6. Map the fixed heap and initialize the global allocator.
+7. Initialize the legacy PIC/PIT interrupt path and enable CPU interrupts.
+8. Trigger one breakpoint exception with `x86_64::instructions::interrupts::int3()`.
+9. Return from the breakpoint handler.
+10. Print `Still alive after breakpoint`.
+11. Run the short cooperative task demo.
+12. Halt forever in `hlt_loop()`.
 
 The normal boot path does not intentionally trigger a double fault. It only uses
 `int3` because breakpoint exceptions are recoverable and prove that the IDT is
@@ -36,7 +42,11 @@ integration tests can reuse the same setup code.
 It exposes:
 
 - `gdt`: Global Descriptor Table, Task State Segment, and double-fault IST stack.
-- `interrupts`: production IDT and CPU exception handlers.
+- `interrupts`: production IDT, CPU exception handlers, and legacy IRQ setup.
+- `memory`: active page-table access and boot-info frame allocation.
+- `allocator`: fixed heap mapping and global allocator setup.
+- `task` and `scheduler`: stackful cooperative kernel tasks.
+- `arch`: architecture-specific context switch code.
 - `vga_buffer`: VGA `print!` and `println!` macros.
 - `serial`: COM1 serial output used by QEMU tests.
 - `qemu`: QEMU debug-exit support and test panic handling.
@@ -88,8 +98,8 @@ already unusable. Without a separate IST stack, a stack overflow can turn into a
 triple fault and reset the machine before Rust code gets control.
 
 The CPU tables and stack are `static mut` because they need stable addresses for
-the entire kernel lifetime, and this early kernel has no heap or once-cell
-primitive yet. Mutation is kept during single-threaded initialization.
+the entire kernel lifetime and GDT setup runs before heap initialization.
+Mutation is kept during single-threaded initialization.
 
 ## IDT And Exception Handlers
 
@@ -212,7 +222,7 @@ The normal kernel binary is excluded from Cargo's test harness:
 
 ```toml
 [[bin]]
-name = "blog_os"
+name = "vlad_os"
 path = "src/main.rs"
 test = false
 ```
