@@ -9,9 +9,10 @@ there is now a fixed early heap, a legacy PIC/PIT interrupt foundation, a
 stackful task scheduler, and a minimal ring-3 userspace foundation with
 per-process address spaces. The current userspace step can load tiny embedded
 ELF64 executables into isolated address spaces, safely copy user buffers for
-the first byte-oriented syscall, and track single-threaded user processes
-through exit and `waitpid`. Dynamic heap growth, demand paging, dynamic
-linking, and filesystems are still deferred.
+byte-oriented syscalls, track single-threaded user processes through exit and
+`waitpid`, and read tiny embedded files through per-process file descriptors.
+Dynamic heap growth, demand paging, dynamic linking, VFS work, and filesystems
+are still deferred.
 
 ## What Exists Today
 
@@ -50,18 +51,22 @@ The kernel currently has:
 - an x86_64 full trap-frame context switch routine for interrupt-time switches
 - minimal user tasks entered through `iretq`
 - software-interrupt syscalls on vector `0x80`
-- user `yield`, `exit`, and `write` syscalls
+- user `yield`, `exit`, `write`, `getpid`, `waitpid`, `open`, `read`, and
+  `close` syscalls
 - checked user-memory range validation and page-by-page copying
 - a small process table above the task scheduler
 - process IDs, parent/child metadata, zombie state, `getpid`, and exact-child
   `waitpid`
+- per-process descriptor tables and a kernel-wide open-file table
+- read-only embedded files exposed through `open` and `read`
 - contained user-mode general-protection faults
 - isolated user address spaces with one page-table root per user process
 - scheduler CR3 switching between kernel and user address spaces
 - contained user-mode page faults
 - a strict embedded ELF64 loader for static user executables
 - process-style user spawning from ELF entry points
-- a narrow `write(fd, user_ptr, len)` path for fd 1 and 2
+- a narrow `write(fd, user_ptr, len)` path routed through file descriptors
+- a tiny embedded read-only file registry for `/hello.txt` and `/motd`
 - one isolated double-fault test kernel
 - one isolated page-fault test kernel
 - one isolated memory-mapping test kernel
@@ -74,6 +79,7 @@ The kernel currently has:
 - one isolated ELF-loader test kernel
 - one isolated user-syscall and checked user-memory test kernel
 - one isolated process-lifecycle test kernel
+- one isolated file-descriptor and embedded file I/O test kernel
 
 For line-by-line details, start with
 [kernel_entry.md](code_walkthrough/kernel_entry.md).
@@ -185,6 +191,8 @@ The project has both `src/lib.rs` and `src/main.rs`.
 - `task`
 - `scheduler`
 - `process`
+- `fd`
+- `file`
 - `address_space`
 - `elf`
 - `syscall`
@@ -377,6 +385,7 @@ longer-lived user resources and lifecycle metadata:
 - `Running` or `Zombie` state
 - process exit reason
 - the process address space
+- the process file descriptor table
 - the process main task
 
 This milestone supports only one user task per process. That keeps the process
@@ -426,6 +435,9 @@ timer/yield, then Rust dispatch reads the syscall number from `rax`:
 - `2`: copy bytes from a checked user buffer to the serial-backed output path
 - `3`: return the current process ID
 - `4`: wait for one exact child PID
+- `5`: open one exact embedded-file path read-only
+- `6`: read bytes from a descriptor into checked user memory
+- `7`: close a descriptor
 
 This is intentionally not `syscall/sysret`; software interrupts reuse the
 kernel's current trap-frame machinery and keep this step focused on safe
@@ -466,6 +478,42 @@ another user task, or the same task later.
 See [userspace.md](code_walkthrough/userspace.md),
 [address_spaces.md](code_walkthrough/address_spaces.md), and
 [process_lifecycle.md](code_walkthrough/process_lifecycle.md).
+
+## File Descriptors And Embedded Files
+
+The current file layer is intentionally smaller than a filesystem. Each
+process owns an `FdTable`, and the scheduler owns a kernel-wide
+`OpenFileTable`. A descriptor entry points to an open-file object. The
+open-file object owns the access mode, object kind, current offset, and
+reference count.
+
+The first three descriptors are installed for each new process:
+
+- fd 0: `NullInput`, currently returns EOF on read
+- fd 1: `ConsoleStdout`, writes to serial output
+- fd 2: `ConsoleStderr`, writes to serial output
+
+Regular file opens use a tiny embedded registry:
+
+```text
+/hello.txt -> "hello from embedded file\n"
+/motd      -> "tiny kernel says hello\n"
+```
+
+Lookup is exact byte matching on `(path_ptr, path_len)`. There is no directory
+tree, path normalization, UTF-8 requirement, symlink handling, mount point, or
+persistent storage. Every `open` creates a new open-file object with offset 0,
+so two opens of the same path have independent offsets. `read` advances the
+offset only after the checked kernel-to-user copy succeeds. `close` removes the
+descriptor and drops the open-file reference; process exit closes all remaining
+descriptors.
+
+The `write` syscall now follows the same fd dispatch path as `read` and
+`close`. Writing to stdout or stderr copies bytes from checked user memory and
+routes them to COM1 serial output. Writing to read-only embedded files or the
+stdin placeholder returns `-EBADF`.
+
+See [file_descriptors_and_basic_io.md](code_walkthrough/file_descriptors_and_basic_io.md).
 
 ## Embedded ELF Loader
 
@@ -512,11 +560,13 @@ See [elf_loader.md](code_walkthrough/elf_loader.md).
 
 ## User Memory And `write`
 
-The first useful user-facing syscall is intentionally small:
+The checked user-buffer boundary still matters for every syscall that accepts a
+user pointer. The first consumer was `write`, and the same helpers now support
+`open` path copying and `read` destination buffers:
 
 ```text
 rax = 2              syscall number
-rdi = fd             1 for stdout, 2 for stderr
+rdi = fd             descriptor resolved through the process fd table
 rsi = user pointer   byte buffer in the current user address space
 rdx = len            byte count
 int 0x80
@@ -539,9 +589,11 @@ This preserves a useful distinction:
 - an illegal pointer passed to `write` returns `-EFAULT`, and the user task may
   continue
 
-The current `write` accepts only fd 1 and fd 2, treats the buffer as arbitrary
-bytes, and routes both to COM1 serial output. There is no file descriptor table,
-VFS, blocking I/O, `read`, `open`, or `close` yet.
+`write` treats the buffer as arbitrary bytes, not a NUL-terminated string.
+Descriptor handling is no longer hardcoded in syscall dispatch: fd 1 and fd 2
+work because a new process starts with stdout and stderr entries in its
+descriptor table. Writing to stdin or a read-only embedded file returns
+`-EBADF`.
 
 See [user_memory_and_write.md](code_walkthrough/user_memory_and_write.md).
 
@@ -603,6 +655,7 @@ The tests are harness-free bootable kernels:
 - `tests/elf_loader.rs`
 - `tests/user_syscalls.rs`
 - `tests/process_lifecycle.rs`
+- `tests/file_descriptors.rs`
 
 They do not use Rust's normal test harness because this is a `no_std` kernel.
 Instead, each test file defines or generates its own `_start`.
@@ -639,7 +692,10 @@ write sources, cross-page buffers, checked kernel-to-user copying, unchanged
 direct user fault semantics, and preemption across syscall-heavy user tasks.
 The process-lifecycle test checks process IDs, parent/child relationships,
 blocking and nonblocking `waitpid`, zombie persistence before reap, bad status
-pointers, child fault status, and continued scheduling after child exit.
+pointers, child fault status, and continued scheduling after child exit. The
+file-descriptor test checks stdio setup, embedded-file open/read/write/close
+paths, fd reuse, independent open offsets, process-exit descriptor cleanup, and
+continued preemption across file syscalls.
 
 See [tests.md](code_walkthrough/tests.md) and
 [build_config.md](code_walkthrough/build_config.md).
@@ -663,6 +719,7 @@ cargo +nightly test --test address_spaces
 cargo +nightly test --test elf_loader
 cargo +nightly test --test user_syscalls
 cargo +nightly test --test process_lifecycle
+cargo +nightly test --test file_descriptors
 ```
 
 Use this to boot the normal kernel:
@@ -688,7 +745,8 @@ kernel still does not have:
 - filesystem-backed `execve`
 - copy-on-write
 - a broad syscall API
-- file descriptor tables, `read`, `open`, and `close`
+- a VFS, writable files, directories, `lseek`, `dup`, pipes, sockets, and
+  filesystem-backed file descriptors
 - `fork`, `exec` replacement, signals, process groups, and multiple user
   threads per process
 - keyboard decoding or input queues

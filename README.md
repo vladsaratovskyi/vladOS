@@ -43,11 +43,17 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
   returns through the interrupt-return path
 - minimal ring-3 user task foundation using the current trap-frame restore path
 - interrupt-based syscall path on vector `0x80`
-- user syscalls for `yield`, `exit`, and `write`
+- user syscalls for `yield`, `exit`, `write`, `getpid`, `waitpid`, `open`,
+  `read`, and `close`
 - checked page-by-page user-memory copying for syscall buffers
 - minimal process layer above the task scheduler
 - per-process IDs, parent/child metadata, zombie exit state, `getpid`, and
   exact-child `waitpid`
+- per-process file descriptor tables
+- kernel open-file table with per-open offsets
+- read-only embedded file registry for `/hello.txt` and `/motd`
+- fd 0/1/2 stdio convention with placeholder EOF stdin and serial-backed
+  stdout/stderr
 - contained user-mode general-protection fault handling
 - isolated user address spaces with one page-table root per user task
 - CR3 switching in the scheduler
@@ -76,7 +82,10 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - isolated QEMU integration test for process IDs, parent/child metadata,
   blocking and nonblocking `waitpid`, zombie reaping, bad wait-status pointers,
   and faulted-child wait status
-- no APIC, demand paging, dynamic linking, heap growth, or filesystem
+- isolated QEMU integration test for file descriptors, embedded read-only file
+  reads, close/reuse behavior, per-process fd privacy, and preemption across
+  file syscalls
+- no APIC, demand paging, dynamic linking, heap growth, VFS, or filesystem
 
 Documentation entry points:
 
@@ -219,6 +228,12 @@ Run the isolated process-lifecycle QEMU test:
 cargo +nightly test --test process_lifecycle
 ```
 
+Run the isolated file-descriptor QEMU test:
+
+```powershell
+cargo +nightly test --test file_descriptors
+```
+
 Expected serial output:
 
 ```text
@@ -234,6 +249,7 @@ address_spaces::isolation_and_faults...  [ok]
 elf_loader::embedded_user_elfs...        [ok]
 user_syscalls::write_and_user_memory...  [ok]
 process_lifecycle::getpid_waitpid_zombies... [ok]
+file_descriptors::embedded_file_io... [ok]
 ```
 
 The normal kernel boot does not intentionally double fault or page fault. These
@@ -260,6 +276,7 @@ cargo +nightly test --test address_spaces
 cargo +nightly test --test elf_loader
 cargo +nightly test --test user_syscalls
 cargo +nightly test --test process_lifecycle
+cargo +nightly test --test file_descriptors
 ```
 
 `cargo +nightly run` boots the normal kernel in QEMU. It does not exit on its

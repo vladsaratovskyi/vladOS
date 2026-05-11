@@ -68,6 +68,8 @@ binary target, integration test kernels, and panic strategy.
 | `harness = false` | Makes the user-syscall test a bootable kernel that exits QEMU after syscall ABI and user-buffer checks. |
 | `[[test]] name = "process_lifecycle"` | Declares the process ID, parent/child, zombie, and `waitpid` integration test target. |
 | `harness = false` | Makes the process-lifecycle test a bootable kernel that exits QEMU after process wait/reap checks. |
+| `[[test]] name = "file_descriptors"` | Declares the descriptor-table and embedded-file I/O integration test target. |
+| `harness = false` | Makes the file-descriptor test a bootable kernel that exits QEMU after open/read/write/close checks. |
 | `[profile.dev] panic = "abort"` | Development builds abort on panic. There is no stack unwinding runtime. |
 | `[profile.release] panic = "abort"` | Release builds also abort on panic. |
 
@@ -96,6 +98,7 @@ or user-program Cargo workspace.
 | `write_hello()` | Builds a small writer used by the preemption-with-syscalls test. |
 | `read_data_exit()` | Builds a program that exits with the qword at `USER_DATA_BASE`, used to prove kernel-to-user copy into writable memory. |
 | process lifecycle fixtures | Build small programs for `getpid`, delayed child exit, immediate child exit, a contained child fault, and a parent suite that checks `waitpid` behavior. |
+| file descriptor fixtures | Build small programs that exercise `open`, `read`, `write`, `close`, fd reuse, read EOF, bad pointers, bad flags, independent offsets, and process-exit descriptor cleanup. |
 | `elf(entry, segments)` | Writes an ELF64 header, one program header per segment, and page-aligned segment file bytes. |
 | instruction helpers such as `mov_rdi_imm64` | Emit the few x86_64 instruction encodings needed by the tiny user fixtures. |
 

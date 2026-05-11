@@ -19,8 +19,8 @@ scheduler still chooses tasks. A process now owns the user address space and
 the lifecycle metadata that belongs above a schedulable task.
 
 There is still only one user task per process. There is no `fork`, exec
-replacement, signal delivery, file descriptor table, process group, session, or
-multi-threaded process model yet.
+replacement, signal delivery, process group, session, or multi-threaded process
+model yet.
 
 ## Task Versus Process
 
@@ -40,6 +40,7 @@ multi-threaded process model yet.
 - `Running` or `Zombie` state
 - `ProcessExit::Exited(code)` or `ProcessExit::Faulted`
 - process-owned `AddressSpace`
+- process-owned file descriptor table
 - main `TaskId`
 
 Kernel tasks have no process ID and continue to run in the kernel address
@@ -193,7 +194,6 @@ Deferred intentionally:
 - `waitpid(-1)`
 - process groups, sessions, and job control
 - multiple user threads per process
-- generic file descriptor tables
 - filesystem-backed programs
 - full POSIX wait-status encoding
 - page-table and frame reclamation

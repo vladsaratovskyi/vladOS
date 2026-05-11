@@ -17,6 +17,7 @@ This page covers:
 - `tests/elf_loader.rs`
 - `tests/user_syscalls.rs`
 - `tests/process_lifecycle.rs`
+- `tests/file_descriptors.rs`
 
 These tests are full bootable kernels. They do not use Rust's normal test
 harness. Each file defines or generates its own `_start`, installs only the
@@ -459,7 +460,8 @@ user-facing `write` syscall.
 
 - Bad syscall pointers return errors to user mode instead of killing the task.
 - Direct illegal user memory access still produces contained user page faults.
-- `write` treats buffers as bytes and supports only fd 1 and 2.
+- `write` treats buffers as bytes and routes fd 1 and fd 2 through the process
+  descriptor table.
 - Kernel-to-user copying checks writable permissions before touching memory.
 
 ### Line-By-Line
@@ -506,3 +508,37 @@ parent/child metadata, child exits become zombies, parents can wait with
 | parent exit code `0` | Proves the user parent observed expected `getpid`, `waitpid`, status, and errno results. |
 | `!process_exists(child.pid)` | Proves successfully waited children were reaped. |
 | non-child root remains zombie | Proves `waitpid` rejected a non-child without consuming it. |
+
+## `tests/file_descriptors.rs`
+
+### Purpose
+
+This test proves the first descriptor layer and tiny embedded-file registry:
+new processes start with stdio descriptors, `open` returns the lowest free
+descriptor, `read` uses and advances per-open offsets, `write` routes through
+fd dispatch, `close` releases entries, and process exit closes leaked
+descriptors.
+
+### Invariants
+
+- Descriptor tables are per process.
+- The open-file table is kernel-wide and reference-counted.
+- A failed user-memory copy during `read` must not advance the file offset.
+- Two separate opens of the same path must have independent offsets.
+- File syscalls must not break CR3 switching or PIT preemption.
+
+### Line-By-Line
+
+| Code | Explanation |
+| --- | --- |
+| `FD_SYSCALL_SUITE_ELF` | User fixture that exercises stdio, embedded files, EOF, bad paths, bad flags, invalid buffers, fd reuse, independent offsets, and read/write direction errors. |
+| `FD_FIRST_OPEN_EXIT_ELF` | Opens `/hello.txt` and exits 0 only if the descriptor is 3. |
+| `FD_OPEN_LEAK_EXIT_ELF` | Opens a file and exits without closing it, proving process-exit cleanup releases descriptors. |
+| `file_syscall_suite()` | Spawns the main fd fixture, checks fd 0/1/2 before it runs, verifies it exits 0, and checks serial output contains `/hello.txt` and `/motd` contents. |
+| `process_fd_is_open(process.pid, 0..2)` | Confirms the fresh process has stdio descriptors installed through its fd table. |
+| `process_open_fd_count(process.pid) == 3` | Confirms only stdio is open before user code calls `open`. |
+| `open_file_count() == 0` after exit | Proves process exit closed descriptors and open-file references were released. |
+| `per_process_fd_tables_are_private()` | Spawns two processes that both expect first open to return fd 3, proving descriptor numbers are process-local. |
+| `process_exit_closes_descriptors()` | Uses a fixture that leaks an fd intentionally; the kernel still releases it when the process exits. |
+| `preemption_still_works_across_file_syscalls()` | Runs a busy user process beside the fd suite with preemption enabled, proving timer switching and CR3 reloads still work during file syscalls. |
+| `serial::output_contains(...)` | Uses the deterministic serial mirror to assert that embedded file bytes were actually written through fd-backed stdout. |

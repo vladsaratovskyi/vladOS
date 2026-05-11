@@ -6,7 +6,8 @@ Back to the [architecture guide](../architecture.md) or the
 This page covers:
 
 - `src/user_memory.rs`
-- the `write` branch in `src/syscall.rs`
+- the user-buffer parts of `src/syscall.rs`
+- the `write` fd dispatch path in `src/scheduler.rs`
 - the byte-oriented pieces of `src/serial.rs`
 
 ## Purpose
@@ -20,8 +21,9 @@ boundary and the first useful user-facing syscall:
 write(fd, user_ptr, len)
 ```
 
-It is intentionally narrow. There is still no file descriptor table,
-filesystem, blocking I/O, `read`, `open`, or `close`.
+The same checked-copy helpers now also support `open` path copying and `read`
+destination buffers. The descriptor model itself is covered in
+[file_descriptors_and_basic_io.md](file_descriptors_and_basic_io.md).
 
 ## Syscall ABI
 
@@ -34,13 +36,17 @@ The syscall entry path is still `int 0x80`:
 | `rax = 2` | `write` |
 | `rax = 3` | `getpid` |
 | `rax = 4` | `waitpid` |
-| `rdi` | `write` fd; only 1 and 2 are accepted |
-| `rsi` | `write` user buffer pointer |
-| `rdx` | `write` byte length |
+| `rax = 5` | `open` |
+| `rax = 6` | `read` |
+| `rax = 7` | `close` |
+| `rdi` | first syscall argument, such as fd or path pointer |
+| `rsi` | second syscall argument, such as user buffer pointer or path length |
+| `rdx` | third syscall argument, such as byte length, flags, or wait options |
 | `rax` on return | non-negative success value or negative errno-like error |
 
-The only error numbers added for this step are `EBADF`, `EFAULT`, `EINVAL`, and
-`ENOSYS`. Unknown syscalls return `-ENOSYS`.
+The errno-like values are deliberately small: `ENOENT`, `EBADF`, `ECHILD`,
+`EFAULT`, `EINVAL`, `ENFILE`, `EMFILE`, `ENAMETOOLONG`, and `ENOSYS`. Unknown
+syscalls return `-ENOSYS`.
 
 ## Checked User Memory
 
@@ -86,15 +92,17 @@ and argv/envp setup.
 
 ## `SYS_WRITE`
 
-`sys_write(fd, user_buf, len)` supports:
+`sys_write(fd, user_buf, len)` now resolves `fd` through the current process's
+descriptor table:
 
-- `fd == 1`: stdout
-- `fd == 2`: stderr
+- `ConsoleStdout`: copy bytes from user memory and write them to COM1 serial
+- `ConsoleStderr`: copy bytes from user memory and write them to COM1 serial
+- `NullInput`: return `-EBADF`
+- read-only embedded files: return `-EBADF`
 
-Both currently route to COM1 serial output. The buffer is arbitrary bytes, not a
-NUL-terminated string and not assumed to be UTF-8. The implementation validates
-the entire read range first, then copies in small fixed chunks and writes those
-chunks to serial.
+The buffer is arbitrary bytes, not a NUL-terminated string and not assumed to
+be UTF-8. The implementation validates the entire read range first, then copies
+in small fixed chunks and writes those chunks to serial.
 
 For deterministic tests, `serial::write_bytes(...)` also mirrors syscall output
 into a fixed in-kernel byte buffer. This is a test helper, not a file
@@ -114,15 +122,17 @@ descriptor table or general logging design.
 - direct user writes to read-only pages still fault the task
 - PIT preemption still works with syscall-heavy ELF user tasks
 
+`tests/file_descriptors.rs` adds coverage for the same copy boundary through
+`open`, `read`, and fd-routed `write`.
+
 ## Deferred Work
 
 Deferred intentionally:
 
-- file descriptor tables
-- filesystem-backed files
-- `read`, `open`, and `close`
+- a VFS and filesystem-backed files
+- writable regular files
+- `lseek`, `dup`, pipes, sockets, and fd inheritance
 - blocking I/O
-- process hierarchy and `wait`
 - `fork` and copy-on-write
 - demand paging, `brk`, and `mmap`
 - dynamic linking

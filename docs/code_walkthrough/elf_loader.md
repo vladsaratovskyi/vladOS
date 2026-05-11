@@ -101,6 +101,9 @@ The generated programs use the current syscall ABI:
 | `rax = 2` | syscall `write` |
 | `rax = 3` | syscall `getpid` |
 | `rax = 4` | syscall `waitpid` |
+| `rax = 5` | syscall `open` |
+| `rax = 6` | syscall `read` |
+| `rax = 7` | syscall `close` |
 | `rdi` | exit code for `exit`, or initial test argument before the program changes it |
 | `int 0x80` | enter the kernel syscall path |
 
@@ -116,6 +119,9 @@ Fixtures include:
 - `bad_machine.elf`: has a wrong `e_machine` value for rejection coverage.
 - process-lifecycle fixtures: exercise `getpid`, exact-child `waitpid`,
   zombie status, and contained user faults.
+- file-descriptor fixtures: exercise embedded-file `open`, `read`, fd-routed
+  `write`, `close`, bad arguments, fd reuse, independent offsets, and
+  descriptor cleanup on process exit.
 
 ## `tests/elf_loader.rs`
 

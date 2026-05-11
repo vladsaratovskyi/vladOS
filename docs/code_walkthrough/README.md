@@ -26,15 +26,19 @@ Read order:
 11. [process_lifecycle.md](process_lifecycle.md): `src/process.rs`, the
    process-aware scheduler pieces, `getpid`, `waitpid`, and
    `tests/process_lifecycle.rs`
-12. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
+12. [file_descriptors_and_basic_io.md](file_descriptors_and_basic_io.md):
+   `src/fd.rs`, `src/file.rs`, descriptor syscalls, and
+   `tests/file_descriptors.rs`
+13. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
    `src/serial.rs`, and `src/qemu.rs`
-13. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
+14. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
    `tests/memory_mapping.rs`, `tests/heap_allocation.rs`, and
    `tests/interrupts.rs`, `tests/cooperative_tasks.rs`, and
    `tests/preemptive_tasks.rs`, `tests/userspace.rs`, and
    `tests/address_spaces.rs`, `tests/elf_loader.rs`, and
-   `tests/user_syscalls.rs`, and `tests/process_lifecycle.rs`
-14. [build_config.md](build_config.md): `Cargo.toml`, `build.rs`,
+   `tests/user_syscalls.rs`, `tests/process_lifecycle.rs`, and
+   `tests/file_descriptors.rs`
+15. [build_config.md](build_config.md): `Cargo.toml`, `build.rs`,
    `.cargo/config.toml`,
    `x86_64-vlad_os.json`, and `rust-toolchain.toml`
 

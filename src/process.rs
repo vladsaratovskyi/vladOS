@@ -3,6 +3,8 @@ use alloc::vec::Vec;
 use x86_64::VirtAddr;
 
 use crate::address_space::AddressSpace;
+use crate::fd::FdTable;
+use crate::file::{FileError, OpenFileTable};
 use crate::task::TaskId;
 
 pub const MAX_PROCESSES: usize = 16;
@@ -63,6 +65,7 @@ pub struct Process {
     children: Vec<ProcessId>,
     state: ProcessState,
     address_space: AddressSpace,
+    fd_table: FdTable,
     main_task: TaskId,
     orphaned: bool,
 }
@@ -84,6 +87,14 @@ impl Process {
         &self.address_space
     }
 
+    pub fn fd_table(&self) -> &FdTable {
+        &self.fd_table
+    }
+
+    pub fn fd_table_mut(&mut self) -> &mut FdTable {
+        &mut self.fd_table
+    }
+
     pub fn main_task(&self) -> TaskId {
         self.main_task
     }
@@ -100,6 +111,7 @@ impl Process {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessError {
     Full,
+    File(FileError),
     MissingParent,
     NotFound,
     NotChild,
@@ -123,22 +135,14 @@ impl ProcessTable {
         &mut self,
         parent: Option<ProcessId>,
         address_space: AddressSpace,
+        fd_table: FdTable,
         main_task: TaskId,
     ) -> Result<ProcessId, ProcessError> {
-        if self.active_count() >= MAX_PROCESSES {
-            return Err(ProcessError::Full);
-        }
-
-        if let Some(parent) = parent {
-            self.get(parent).ok_or(ProcessError::MissingParent)?;
-        }
+        self.can_create(parent)?;
+        self.ensure_slots();
 
         let pid = ProcessId(self.next_pid);
         self.next_pid += 1;
-
-        while self.processes.len() <= pid.0 {
-            self.processes.push(None);
-        }
 
         self.processes[pid.0] = Some(Process {
             pid,
@@ -146,6 +150,7 @@ impl ProcessTable {
             children: Vec::new(),
             state: ProcessState::Running,
             address_space,
+            fd_table,
             main_task,
             orphaned: false,
         });
@@ -158,6 +163,27 @@ impl ProcessTable {
         }
 
         Ok(pid)
+    }
+
+    pub fn can_create(&self, parent: Option<ProcessId>) -> Result<(), ProcessError> {
+        if self.active_count() >= MAX_PROCESSES {
+            return Err(ProcessError::Full);
+        }
+        if self.next_pid > MAX_PROCESSES {
+            return Err(ProcessError::Full);
+        }
+
+        if let Some(parent) = parent {
+            self.get(parent).ok_or(ProcessError::MissingParent)?;
+        }
+
+        Ok(())
+    }
+
+    fn ensure_slots(&mut self) {
+        if self.processes.is_empty() {
+            self.processes.resize_with(MAX_PROCESSES + 1, || None);
+        }
     }
 
     pub fn get(&self, pid: ProcessId) -> Option<&Process> {
@@ -184,15 +210,29 @@ impl ProcessTable {
         Some(self.get(pid)?.address_space())
     }
 
+    pub fn fd_table(&self, pid: ProcessId) -> Option<&FdTable> {
+        Some(self.get(pid)?.fd_table())
+    }
+
+    pub fn fd_table_mut(&mut self, pid: ProcessId) -> Option<&mut FdTable> {
+        Some(self.get_mut(pid)?.fd_table_mut())
+    }
+
     pub fn is_child(&self, parent: ProcessId, child: ProcessId) -> bool {
         self.get(parent)
             .map(|process| process.is_child(child))
             .unwrap_or(false)
     }
 
-    pub fn mark_exited(&mut self, pid: ProcessId, exit: ProcessExit) -> Result<(), ProcessError> {
+    pub fn mark_exited(
+        &mut self,
+        pid: ProcessId,
+        exit: ProcessExit,
+        open_files: &mut OpenFileTable,
+    ) -> Result<(), ProcessError> {
         let process = self.get_mut(pid).ok_or(ProcessError::NotFound)?;
         process.state = ProcessState::Zombie(exit);
+        process.fd_table.close_all(open_files);
 
         let children = process.children.clone();
         process.children.clear();

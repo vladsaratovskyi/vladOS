@@ -6,9 +6,10 @@ use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::registers::rflags;
 use x86_64::VirtAddr;
 
-use crate::address_space::AddressSpace;
 use crate::arch::x86_64::context::{self, Context};
 use crate::elf::ElfLoadError;
+use crate::fd::FdTable;
+use crate::file::{self, AccessMode, FileError, OpenFileKind, OpenFileTable, MAX_PATH_LEN};
 use crate::gdt;
 use crate::process::{ProcessError, ProcessExit, ProcessId, ProcessState, ProcessTable};
 use crate::task::{Task, TaskEntry, TaskId, TaskState, UserFaultInfo, WaitReason, MAX_TASKS};
@@ -17,6 +18,8 @@ use crate::user_memory::UserMemoryError;
 use crate::{hlt_loop, println};
 
 static mut SCHEDULER: Scheduler = Scheduler::new();
+
+const WRITE_CHUNK_SIZE: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnError {
@@ -34,6 +37,7 @@ pub struct UserProcessHandle {
 struct Scheduler {
     tasks: Vec<Task>,
     processes: ProcessTable,
+    open_files: OpenFileTable,
     current: Option<usize>,
     main_context: Context,
     preemption_enabled: bool,
@@ -45,6 +49,7 @@ impl Scheduler {
         Self {
             tasks: Vec::new(),
             processes: ProcessTable::new(),
+            open_files: OpenFileTable::new(),
             current: None,
             main_context: Context::empty(),
             preemption_enabled: false,
@@ -56,6 +61,7 @@ impl Scheduler {
         if self.tasks.len() >= MAX_TASKS {
             return Err(SpawnError::Full);
         }
+        self.ensure_task_capacity();
 
         let id = TaskId(self.tasks.len());
         self.tasks.push(Task::new(id, entry, initial_rflags));
@@ -80,11 +86,17 @@ impl Scheduler {
         if self.tasks.len() >= MAX_TASKS {
             return Err(SpawnError::Full);
         }
+        self.ensure_task_capacity();
+        self.processes
+            .can_create(parent)
+            .map_err(SpawnError::Process)?;
 
         let id = TaskId(self.tasks.len());
+        let fd_table = FdTable::new_with_stdio(&mut self.open_files)
+            .map_err(|error| SpawnError::Process(ProcessError::File(error)))?;
         let pid = self
             .processes
-            .create(parent, init.address_space, id)
+            .create(parent, init.address_space, fd_table, id)
             .map_err(SpawnError::Process)?;
         self.tasks.push(Task::new_user(
             id,
@@ -96,6 +108,12 @@ impl Scheduler {
         ));
 
         Ok(UserProcessHandle { pid, task_id: id })
+    }
+
+    fn ensure_task_capacity(&mut self) {
+        if self.tasks.capacity() < MAX_TASKS {
+            self.tasks.reserve_exact(MAX_TASKS - self.tasks.capacity());
+        }
     }
 
     fn next_ready_after(&self, start: usize) -> Option<usize> {
@@ -199,7 +217,7 @@ impl Scheduler {
             };
 
             self.processes
-                .mark_exited(pid, process_exit)
+                .mark_exited(pid, process_exit, &mut self.open_files)
                 .expect("current task process disappeared during exit");
             self.wake_parent_waiting_for(pid);
             self.processes.reap_orphan_if_zombie(pid);
@@ -386,6 +404,194 @@ impl Scheduler {
     fn set_frame_rax(&self, frame_rsp: u64, value: u64) {
         let frame = unsafe { &mut *(frame_rsp as *mut crate::arch::x86_64::context::TrapFrame) };
         frame.rax = value;
+    }
+
+    fn sys_open_current(
+        &mut self,
+        path_ptr: VirtAddr,
+        path_len: usize,
+        flags: usize,
+    ) -> crate::syscall::SysResult {
+        if flags != crate::syscall::O_RDONLY {
+            return Err(crate::syscall::SysError::Invalid);
+        }
+        if path_len == 0 {
+            return Err(crate::syscall::SysError::NoEntry);
+        }
+        if path_len > MAX_PATH_LEN {
+            return Err(crate::syscall::SysError::NameTooLong);
+        }
+
+        let pid = self
+            .current_process_id()
+            .ok_or(crate::syscall::SysError::BadFd)?;
+        let address_space = self
+            .processes
+            .address_space(pid)
+            .ok_or(crate::syscall::SysError::BadFd)?;
+        let mut path = [0_u8; MAX_PATH_LEN];
+        crate::user_memory::copy_from_user(address_space, &mut path[..path_len], path_ptr)
+            .map_err(map_user_memory_error)?;
+
+        let file_id =
+            file::find_embedded_file(&path[..path_len]).ok_or(crate::syscall::SysError::NoEntry)?;
+        let open_file = self
+            .open_files
+            .alloc(OpenFileKind::EmbeddedFile(file_id), AccessMode::ReadOnly)
+            .map_err(map_file_error)?;
+
+        let fd = self
+            .processes
+            .fd_table_mut(pid)
+            .ok_or(crate::syscall::SysError::BadFd)?
+            .allocate_lowest(open_file);
+
+        match fd {
+            Ok(fd) => Ok(fd.0),
+            Err(error) => {
+                self.open_files.dec_ref(open_file);
+                Err(map_file_error(error))
+            }
+        }
+    }
+
+    fn sys_read_current(
+        &mut self,
+        fd: usize,
+        user_buf: VirtAddr,
+        len: usize,
+    ) -> crate::syscall::SysResult {
+        if len == 0 {
+            return Ok(0);
+        }
+
+        let pid = self
+            .current_process_id()
+            .ok_or(crate::syscall::SysError::BadFd)?;
+        let entry = self
+            .processes
+            .fd_table(pid)
+            .and_then(|table| table.get(fd))
+            .ok_or(crate::syscall::SysError::BadFd)?;
+        let open_file = self
+            .open_files
+            .get(entry.open_file)
+            .ok_or(crate::syscall::SysError::BadFd)?;
+
+        if open_file.access() != AccessMode::ReadOnly {
+            return Err(crate::syscall::SysError::BadFd);
+        }
+
+        match open_file.kind() {
+            OpenFileKind::NullInput => Ok(0),
+            OpenFileKind::ConsoleStdout | OpenFileKind::ConsoleStderr => {
+                Err(crate::syscall::SysError::BadFd)
+            }
+            OpenFileKind::EmbeddedFile(file_id) => {
+                let file = file::embedded_file(file_id).ok_or(crate::syscall::SysError::BadFd)?;
+                let offset = open_file.offset();
+                if offset >= file.bytes.len() {
+                    return Ok(0);
+                }
+
+                let count = core::cmp::min(len, file.bytes.len() - offset);
+                let bytes = &file.bytes[offset..offset + count];
+                let address_space = self
+                    .processes
+                    .address_space(pid)
+                    .ok_or(crate::syscall::SysError::BadFd)?;
+                crate::user_memory::copy_to_user(address_space, user_buf, bytes)
+                    .map_err(map_user_memory_error)?;
+
+                self.open_files
+                    .get_mut(entry.open_file)
+                    .expect("open file disappeared during read")
+                    .set_offset(offset + count);
+
+                Ok(count)
+            }
+        }
+    }
+
+    fn sys_write_current(
+        &mut self,
+        fd: usize,
+        user_buf: VirtAddr,
+        len: usize,
+    ) -> crate::syscall::SysResult {
+        if len == 0 {
+            return Ok(0);
+        }
+
+        let pid = self
+            .current_process_id()
+            .ok_or(crate::syscall::SysError::BadFd)?;
+        let entry = self
+            .processes
+            .fd_table(pid)
+            .and_then(|table| table.get(fd))
+            .ok_or(crate::syscall::SysError::BadFd)?;
+        let open_file = self
+            .open_files
+            .get(entry.open_file)
+            .ok_or(crate::syscall::SysError::BadFd)?;
+
+        if open_file.access() != AccessMode::WriteOnly {
+            return Err(crate::syscall::SysError::BadFd);
+        }
+
+        match open_file.kind() {
+            OpenFileKind::ConsoleStdout | OpenFileKind::ConsoleStderr => {
+                let address_space = self
+                    .processes
+                    .address_space(pid)
+                    .ok_or(crate::syscall::SysError::BadFd)?;
+                crate::user_memory::validate_user_read_range(address_space, user_buf, len)
+                    .map_err(map_user_memory_error)?;
+
+                let mut written = 0;
+                let mut buffer = [0_u8; WRITE_CHUNK_SIZE];
+                while written < len {
+                    let count = core::cmp::min(buffer.len(), len - written);
+                    let src = VirtAddr::new(
+                        user_buf
+                            .as_u64()
+                            .checked_add(written as u64)
+                            .ok_or(crate::syscall::SysError::Fault)?,
+                    );
+                    crate::user_memory::copy_from_user(address_space, &mut buffer[..count], src)
+                        .map_err(map_user_memory_error)?;
+                    crate::serial::write_bytes(&buffer[..count]);
+                    written += count;
+                }
+
+                Ok(written)
+            }
+            OpenFileKind::NullInput | OpenFileKind::EmbeddedFile(_) => {
+                Err(crate::syscall::SysError::BadFd)
+            }
+        }
+    }
+
+    fn sys_close_current(&mut self, fd: usize) -> crate::syscall::SysResult {
+        let pid = self
+            .current_process_id()
+            .ok_or(crate::syscall::SysError::BadFd)?;
+        let table = self
+            .processes
+            .fd_table_mut(pid)
+            .ok_or(crate::syscall::SysError::BadFd)?;
+
+        table
+            .close(fd, &mut self.open_files)
+            .map_err(map_file_error)?;
+
+        Ok(0)
+    }
+
+    fn current_process_id(&self) -> Option<ProcessId> {
+        let current = self.current?;
+        self.tasks[current].process_id()
     }
 
     fn prepare_to_run(&mut self, task_index: usize) {
@@ -621,6 +827,38 @@ pub fn process_exists(pid: ProcessId) -> bool {
     cpu_interrupts::without_interrupts(|| unsafe { scheduler_mut().processes.exists(pid) })
 }
 
+pub fn process_fd_is_open(pid: ProcessId, fd: usize) -> bool {
+    cpu_interrupts::without_interrupts(|| unsafe {
+        scheduler_mut()
+            .processes
+            .fd_table(pid)
+            .map(|table| table.is_open(fd))
+            .unwrap_or(false)
+    })
+}
+
+pub fn process_open_fd_count(pid: ProcessId) -> usize {
+    cpu_interrupts::without_interrupts(|| unsafe {
+        scheduler_mut()
+            .processes
+            .fd_table(pid)
+            .map(|table| table.open_count())
+            .unwrap_or(0)
+    })
+}
+
+pub fn open_file_count() -> usize {
+    cpu_interrupts::without_interrupts(|| unsafe { scheduler_mut().open_files.active_count() })
+}
+
+pub fn open_file_offset_for_fd(pid: ProcessId, fd: usize) -> Option<usize> {
+    cpu_interrupts::without_interrupts(|| unsafe {
+        let scheduler = scheduler_mut();
+        let entry = scheduler.processes.fd_table(pid)?.get(fd)?;
+        Some(scheduler.open_files.get(entry.open_file)?.offset())
+    })
+}
+
 pub fn read_user_u64(task_id: TaskId, address: VirtAddr) -> Option<u64> {
     cpu_interrupts::without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
@@ -653,30 +891,31 @@ pub fn copy_to_user(
     })
 }
 
-pub(crate) fn with_current_user_address_space<R>(
-    f: impl FnOnce(&AddressSpace) -> R,
-) -> Result<R, UserMemoryError> {
-    unsafe {
-        let scheduler = scheduler_mut();
-        let current = scheduler.current.ok_or(UserMemoryError::Unmapped)?;
-        let process_id = scheduler.tasks[current]
-            .process_id()
-            .ok_or(UserMemoryError::Unmapped)?;
-        let address_space = scheduler
-            .processes
-            .address_space(process_id)
-            .ok_or(UserMemoryError::Unmapped)?;
-
-        Ok(f(address_space))
-    }
-}
-
 pub(crate) fn current_process_id() -> Option<ProcessId> {
     unsafe {
         let scheduler = scheduler_mut();
-        let current = scheduler.current?;
-        scheduler.tasks[current].process_id()
+        scheduler.current_process_id()
     }
+}
+
+pub(crate) fn sys_open(
+    path_ptr: VirtAddr,
+    path_len: usize,
+    flags: usize,
+) -> crate::syscall::SysResult {
+    unsafe { scheduler_mut().sys_open_current(path_ptr, path_len, flags) }
+}
+
+pub(crate) fn sys_read(fd: usize, user_buf: VirtAddr, len: usize) -> crate::syscall::SysResult {
+    unsafe { scheduler_mut().sys_read_current(fd, user_buf, len) }
+}
+
+pub(crate) fn sys_write(fd: usize, user_buf: VirtAddr, len: usize) -> crate::syscall::SysResult {
+    unsafe { scheduler_mut().sys_write_current(fd, user_buf, len) }
+}
+
+pub(crate) fn sys_close(fd: usize) -> crate::syscall::SysResult {
+    unsafe { scheduler_mut().sys_close_current(fd) }
 }
 
 pub(crate) fn run_current_task() -> ! {
@@ -769,6 +1008,22 @@ fn finish_current_task() -> ! {
 
     println!("task returned after finish");
     hlt_loop();
+}
+
+fn map_file_error(error: FileError) -> crate::syscall::SysError {
+    match error {
+        FileError::BadFd => crate::syscall::SysError::BadFd,
+        FileError::NoEntry => crate::syscall::SysError::NoEntry,
+        FileError::TooManySystemFiles => crate::syscall::SysError::SystemFileLimit,
+        FileError::TooManyProcessFiles => crate::syscall::SysError::ProcessFileLimit,
+        FileError::NameTooLong => crate::syscall::SysError::NameTooLong,
+        FileError::Invalid => crate::syscall::SysError::Invalid,
+        FileError::Fault => crate::syscall::SysError::Fault,
+    }
+}
+
+fn map_user_memory_error(_error: UserMemoryError) -> crate::syscall::SysError {
+    crate::syscall::SysError::Fault
 }
 
 unsafe fn scheduler_mut() -> &'static mut Scheduler {

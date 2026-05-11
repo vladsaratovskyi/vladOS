@@ -80,20 +80,26 @@ See [address_spaces.md](address_spaces.md) for page-table construction.
 
 ## Syscall Flow
 
-`src/syscall.rs` defines vector `0x80` and five syscall numbers:
+`src/syscall.rs` defines vector `0x80` and these syscall numbers:
 
 - `0`: `Yield`
 - `1`: `Exit`
 - `2`: `Write`
 - `3`: `GetPid`
 - `4`: `WaitPid`
+- `5`: `Open`
+- `6`: `Read`
+- `7`: `Close`
 
 The calling convention is intentionally small: syscall number in `rax`, return
 value in `rax`, and `exit` uses `rdi` as a minimal process exit code for
 deterministic tests. `write` uses `rdi` for fd, `rsi` for the user buffer, and
 `rdx` for the byte length. `waitpid` uses `rdi` for an exact child PID, `rsi`
-for an optional wait-status pointer, and `rdx` for options. The current user
-code uses inline/global assembly `int 0x80` wrappers rather than calling kernel
+for an optional wait-status pointer, and `rdx` for options. `open` uses
+`rdi/rsi/rdx` for path pointer, path length, and flags. `read` uses the same
+fd/buffer/length register pattern as `write`, with the buffer used as the
+destination. `close` uses `rdi` for the descriptor number. The current user code
+uses inline/global assembly `int 0x80` wrappers rather than calling kernel
 scheduler functions directly.
 
 The flow is:
@@ -109,18 +115,23 @@ The flow is:
    marks the current task `Finished`, wakes any parent waiting for that child,
    and resumes the next ready task.
 9. `Write` validates and copies the user buffer before returning a byte count
-   or negative errno-like value in saved `rax`.
+   or negative errno-like value in saved `rax`; descriptor routing happens
+   through the process fd table.
 10. `GetPid` returns the current process ID.
 11. `WaitPid` either returns immediately, reaps a zombie child, or blocks the
     parent task until a specific child exits.
-12. Assembly restores the selected trap frame and finishes with `iretq`.
+12. `Open`, `Read`, and `Close` dispatch through the minimal embedded-file and
+    descriptor layer.
+13. Assembly restores the selected trap frame and finishes with `iretq`.
 
 This uses software interrupts instead of `syscall/sysret` because the kernel
 already has a full trap-frame interrupt path. It keeps this step about safe
 privilege transitions rather than fast syscall entry.
 
 See [user_memory_and_write.md](user_memory_and_write.md) for the checked
-user-buffer boundary used by `Write`.
+user-buffer boundary and
+[file_descriptors_and_basic_io.md](file_descriptors_and_basic_io.md) for
+descriptor dispatch.
 
 ## User Fault Flow
 

@@ -72,6 +72,10 @@ harness = false
 name = "process_lifecycle"
 harness = false
 
+[[test]]
+name = "file_descriptors"
+harness = false
+
 [profile.dev]
 panic = "abort"
 

@@ -19,12 +19,32 @@ const SYS_EXIT: u32 = 1;
 const SYS_WRITE: u32 = 2;
 const SYS_GETPID: u32 = 3;
 const SYS_WAITPID: u32 = 4;
+const SYS_OPEN: u32 = 5;
+const SYS_READ: u32 = 6;
+const SYS_CLOSE: u32 = 7;
+const ENOENT: u64 = (-2_i64) as u64;
 const EBADF: u64 = (-9_i64) as u64;
 const ECHILD: u64 = (-10_i64) as u64;
 const EFAULT: u64 = (-14_i64) as u64;
+const EINVAL: u64 = (-22_i64) as u64;
 const WNOHANG: u64 = 1;
+const O_RDONLY: u64 = 0;
 const WAIT_EXITED: u32 = 0;
 const WAIT_FAULTED: u32 = 1;
+
+const HELLO_FILE: &[u8] = b"hello from embedded file\n";
+const MOTD_FILE: &[u8] = b"tiny kernel says hello\n";
+const HELLO_PATH: &[u8] = b"/hello.txt";
+const MOTD_PATH: &[u8] = b"/motd";
+const MISSING_PATH: &[u8] = b"/missing";
+
+const FD_HELLO_PATH: u64 = USER_DATA_BASE;
+const FD_MOTD_PATH: u64 = USER_DATA_BASE + 16;
+const FD_MISSING_PATH: u64 = USER_DATA_BASE + 32;
+const FD_TEMP_FD_A: u64 = USER_DATA_BASE + 48;
+const FD_TEMP_FD_B: u64 = USER_DATA_BASE + 56;
+const FD_BUFFER: u64 = USER_DATA_BASE + 128;
+const FD_CROSS_BUFFER: u64 = USER_DATA_BASE + PAGE_SIZE - 4;
 
 const PROCESS_PID_DELAYED: u64 = USER_DATA_BASE;
 const PROCESS_PID_IMMEDIATE: u64 = USER_DATA_BASE + 8;
@@ -63,6 +83,9 @@ fn main() {
         "process_wait_parent_suite.elf",
         process_wait_parent_suite(),
     );
+    write_fixture(out_dir, "fd_syscall_suite.elf", fd_syscall_suite());
+    write_fixture(out_dir, "fd_first_open_exit.elf", fd_first_open_exit());
+    write_fixture(out_dir, "fd_open_leak_exit.elf", fd_open_leak_exit());
 
     let mut bad_machine = exit_42();
     bad_machine[18..20].copy_from_slice(&3_u16.to_le_bytes());
@@ -409,6 +432,158 @@ fn process_wait_parent_suite() -> Vec<u8> {
     )
 }
 
+fn fd_syscall_suite() -> Vec<u8> {
+    let mut code = Vec::new();
+
+    read_syscall_fd_imm(&mut code, 0, FD_BUFFER, 8);
+    check_rax_eq_continue(&mut code, 0);
+
+    open_syscall(&mut code, FD_HELLO_PATH, HELLO_PATH.len() as u64, O_RDONLY);
+    check_rax_eq_continue(&mut code, 3);
+    store_rax(&mut code, FD_TEMP_FD_A);
+    read_syscall_fd_mem(&mut code, FD_TEMP_FD_A, FD_BUFFER, HELLO_FILE.len() as u64);
+    check_rax_eq_continue(&mut code, HELLO_FILE.len() as u64);
+    check_byte_mem_eq_continue(&mut code, FD_BUFFER, b'h');
+    write_syscall_fd_imm(&mut code, 1, FD_BUFFER, HELLO_FILE.len() as u64);
+    check_rax_eq_continue(&mut code, HELLO_FILE.len() as u64);
+    read_syscall_fd_mem(&mut code, FD_TEMP_FD_A, FD_BUFFER, 1);
+    check_rax_eq_continue(&mut code, 0);
+    close_syscall_fd_mem(&mut code, FD_TEMP_FD_A);
+    check_rax_eq_continue(&mut code, 0);
+    close_syscall_fd_mem(&mut code, FD_TEMP_FD_A);
+    check_rax_eq_continue(&mut code, EBADF);
+    read_syscall_fd_mem(&mut code, FD_TEMP_FD_A, FD_BUFFER, 1);
+    check_rax_eq_continue(&mut code, EBADF);
+
+    open_syscall(
+        &mut code,
+        FD_MISSING_PATH,
+        MISSING_PATH.len() as u64,
+        O_RDONLY,
+    );
+    check_rax_eq_continue(&mut code, ENOENT);
+    open_syscall(&mut code, USER_TEST_PAGE_BASE, 4, O_RDONLY);
+    check_rax_eq_continue(&mut code, EFAULT);
+    open_syscall(&mut code, FD_HELLO_PATH, HELLO_PATH.len() as u64, 99);
+    check_rax_eq_continue(&mut code, EINVAL);
+
+    open_syscall(&mut code, FD_HELLO_PATH, HELLO_PATH.len() as u64, O_RDONLY);
+    check_rax_eq_continue(&mut code, 3);
+    store_rax(&mut code, FD_TEMP_FD_A);
+    close_syscall_fd_mem(&mut code, FD_TEMP_FD_A);
+    check_rax_eq_continue(&mut code, 0);
+    open_syscall(&mut code, FD_MOTD_PATH, MOTD_PATH.len() as u64, O_RDONLY);
+    check_rax_eq_continue(&mut code, 3);
+    store_rax(&mut code, FD_TEMP_FD_A);
+    read_syscall_fd_mem(&mut code, FD_TEMP_FD_A, FD_BUFFER, MOTD_FILE.len() as u64);
+    check_rax_eq_continue(&mut code, MOTD_FILE.len() as u64);
+    write_syscall_fd_imm(&mut code, 1, FD_BUFFER, MOTD_FILE.len() as u64);
+    check_rax_eq_continue(&mut code, MOTD_FILE.len() as u64);
+    close_syscall_fd_mem(&mut code, FD_TEMP_FD_A);
+    check_rax_eq_continue(&mut code, 0);
+
+    open_syscall(&mut code, FD_HELLO_PATH, HELLO_PATH.len() as u64, O_RDONLY);
+    check_rax_eq_continue(&mut code, 3);
+    store_rax(&mut code, FD_TEMP_FD_A);
+    read_syscall_fd_mem(&mut code, FD_TEMP_FD_A, USER_TEST_PAGE_BASE, 4);
+    check_rax_eq_continue(&mut code, EFAULT);
+    read_syscall_fd_mem(&mut code, FD_TEMP_FD_A, FD_BUFFER, 1);
+    check_rax_eq_continue(&mut code, 1);
+    check_byte_mem_eq_continue(&mut code, FD_BUFFER, b'h');
+    close_syscall_fd_mem(&mut code, FD_TEMP_FD_A);
+    check_rax_eq_continue(&mut code, 0);
+
+    open_syscall(&mut code, FD_HELLO_PATH, HELLO_PATH.len() as u64, O_RDONLY);
+    check_rax_eq_continue(&mut code, 3);
+    store_rax(&mut code, FD_TEMP_FD_A);
+    open_syscall(&mut code, FD_HELLO_PATH, HELLO_PATH.len() as u64, O_RDONLY);
+    check_rax_eq_continue(&mut code, 4);
+    store_rax(&mut code, FD_TEMP_FD_B);
+    read_syscall_fd_mem(&mut code, FD_TEMP_FD_A, FD_BUFFER, 1);
+    check_rax_eq_continue(&mut code, 1);
+    read_syscall_fd_mem(&mut code, FD_TEMP_FD_B, FD_BUFFER + 1, 1);
+    check_rax_eq_continue(&mut code, 1);
+    check_byte_mem_eq_continue(&mut code, FD_BUFFER, b'h');
+    check_byte_mem_eq_continue(&mut code, FD_BUFFER + 1, b'h');
+    close_syscall_fd_mem(&mut code, FD_TEMP_FD_A);
+    check_rax_eq_continue(&mut code, 0);
+    close_syscall_fd_mem(&mut code, FD_TEMP_FD_B);
+    check_rax_eq_continue(&mut code, 0);
+
+    open_syscall(&mut code, FD_HELLO_PATH, HELLO_PATH.len() as u64, O_RDONLY);
+    check_rax_eq_continue(&mut code, 3);
+    store_rax(&mut code, FD_TEMP_FD_A);
+    write_syscall_fd_mem(&mut code, FD_TEMP_FD_A, FD_BUFFER, 1);
+    check_rax_eq_continue(&mut code, EBADF);
+    close_syscall_fd_mem(&mut code, FD_TEMP_FD_A);
+    check_rax_eq_continue(&mut code, 0);
+
+    read_syscall_fd_imm(&mut code, 1, FD_BUFFER, 1);
+    check_rax_eq_continue(&mut code, EBADF);
+
+    open_syscall(&mut code, FD_HELLO_PATH, HELLO_PATH.len() as u64, O_RDONLY);
+    check_rax_eq_continue(&mut code, 3);
+    store_rax(&mut code, FD_TEMP_FD_A);
+    read_syscall_fd_mem(
+        &mut code,
+        FD_TEMP_FD_A,
+        FD_CROSS_BUFFER,
+        HELLO_FILE.len() as u64,
+    );
+    check_rax_eq_continue(&mut code, HELLO_FILE.len() as u64);
+    check_byte_mem_eq_continue(&mut code, FD_CROSS_BUFFER, b'h');
+    check_byte_mem_eq_continue(&mut code, FD_CROSS_BUFFER + 4, b'o');
+    close_syscall_fd_mem(&mut code, FD_TEMP_FD_A);
+    check_rax_eq_continue(&mut code, 0);
+
+    exit_with_code(&mut code, 0);
+
+    fd_elf(code)
+}
+
+fn fd_first_open_exit() -> Vec<u8> {
+    let mut code = Vec::new();
+    open_syscall(&mut code, FD_HELLO_PATH, HELLO_PATH.len() as u64, O_RDONLY);
+    check_rax_eq_continue(&mut code, 3);
+    exit_with_code(&mut code, 0);
+
+    fd_elf(code)
+}
+
+fn fd_open_leak_exit() -> Vec<u8> {
+    let mut code = Vec::new();
+    open_syscall(&mut code, FD_HELLO_PATH, HELLO_PATH.len() as u64, O_RDONLY);
+    check_rax_eq_continue(&mut code, 3);
+    exit_with_code(&mut code, 0);
+
+    fd_elf(code)
+}
+
+fn fd_elf(code: Vec<u8>) -> Vec<u8> {
+    let mut data = vec![0; PAGE_SIZE as usize * 2];
+    data[0..HELLO_PATH.len()].copy_from_slice(HELLO_PATH);
+    data[16..16 + MOTD_PATH.len()].copy_from_slice(MOTD_PATH);
+    data[32..32 + MISSING_PATH.len()].copy_from_slice(MISSING_PATH);
+
+    elf(
+        USER_CODE_BASE,
+        &[
+            Segment {
+                vaddr: USER_CODE_BASE,
+                flags: PF_R | PF_X,
+                memsz: code.len() as u64,
+                data: code,
+            },
+            Segment {
+                vaddr: USER_DATA_BASE,
+                flags: PF_R | PF_W,
+                memsz: data.len() as u64,
+                data,
+            },
+        ],
+    )
+}
+
 fn elf(entry: u64, segments: &[Segment]) -> Vec<u8> {
     let header_size = 64_usize;
     let program_header_size = 56_usize;
@@ -498,6 +673,55 @@ fn write_syscall(bytes: &mut Vec<u8>, fd: u64, ptr: u64, len: u64) {
     int_0x80(bytes);
 }
 
+fn open_syscall(bytes: &mut Vec<u8>, path: u64, len: u64, flags: u64) {
+    mov_rax_imm32(bytes, SYS_OPEN);
+    mov_rdi_imm64(bytes, path);
+    mov_rsi_imm64(bytes, len);
+    mov_rdx_imm64(bytes, flags);
+    int_0x80(bytes);
+}
+
+fn read_syscall_fd_imm(bytes: &mut Vec<u8>, fd: u64, buffer: u64, len: u64) {
+    mov_rax_imm32(bytes, SYS_READ);
+    mov_rdi_imm64(bytes, fd);
+    mov_rsi_imm64(bytes, buffer);
+    mov_rdx_imm64(bytes, len);
+    int_0x80(bytes);
+}
+
+fn read_syscall_fd_mem(bytes: &mut Vec<u8>, fd_addr: u64, buffer: u64, len: u64) {
+    mov_rax_imm32(bytes, SYS_READ);
+    mov_rbx_imm64(bytes, fd_addr);
+    bytes.extend_from_slice(&[0x48, 0x8b, 0x3b]); // mov rdi, [rbx]
+    mov_rsi_imm64(bytes, buffer);
+    mov_rdx_imm64(bytes, len);
+    int_0x80(bytes);
+}
+
+fn write_syscall_fd_imm(bytes: &mut Vec<u8>, fd: u64, buffer: u64, len: u64) {
+    mov_rax_imm32(bytes, SYS_WRITE);
+    mov_rdi_imm64(bytes, fd);
+    mov_rsi_imm64(bytes, buffer);
+    mov_rdx_imm64(bytes, len);
+    int_0x80(bytes);
+}
+
+fn write_syscall_fd_mem(bytes: &mut Vec<u8>, fd_addr: u64, buffer: u64, len: u64) {
+    mov_rax_imm32(bytes, SYS_WRITE);
+    mov_rbx_imm64(bytes, fd_addr);
+    bytes.extend_from_slice(&[0x48, 0x8b, 0x3b]); // mov rdi, [rbx]
+    mov_rsi_imm64(bytes, buffer);
+    mov_rdx_imm64(bytes, len);
+    int_0x80(bytes);
+}
+
+fn close_syscall_fd_mem(bytes: &mut Vec<u8>, fd_addr: u64) {
+    mov_rax_imm32(bytes, SYS_CLOSE);
+    mov_rbx_imm64(bytes, fd_addr);
+    bytes.extend_from_slice(&[0x48, 0x8b, 0x3b]); // mov rdi, [rbx]
+    int_0x80(bytes);
+}
+
 fn yield_syscall(bytes: &mut Vec<u8>) {
     mov_rax_imm32(bytes, SYS_YIELD);
     int_0x80(bytes);
@@ -542,6 +766,18 @@ fn check_u32_mem_eq_continue(bytes: &mut Vec<u8>, address: u64, expected: u32) {
 
 fn check_i32_mem_eq_continue(bytes: &mut Vec<u8>, address: u64, expected: i32) {
     check_u32_mem_eq_continue(bytes, address, expected as u32);
+}
+
+fn check_byte_mem_eq_continue(bytes: &mut Vec<u8>, address: u64, expected: u8) {
+    mov_rbx_imm64(bytes, address);
+    bytes.extend_from_slice(&[0x80, 0x3b, expected]); // cmp byte [rbx], imm8
+    bytes.extend_from_slice(&[0x74, 21]); // je over the failure exit sequence
+    exit_with_code(bytes, 1);
+}
+
+fn store_rax(bytes: &mut Vec<u8>, address: u64) {
+    mov_rbx_imm64(bytes, address);
+    bytes.extend_from_slice(&[0x48, 0x89, 0x03]); // mov [rbx], rax
 }
 
 fn exit_with_code(bytes: &mut Vec<u8>, code: u64) {

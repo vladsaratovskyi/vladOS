@@ -8,6 +8,8 @@ pub mod address_space;
 pub mod allocator;
 pub mod arch;
 pub mod elf;
+pub mod fd;
+pub mod file;
 pub mod gdt;
 pub mod interrupts;
 pub mod memory;
