@@ -17,6 +17,7 @@ pub mod serial;
 pub mod syscall;
 pub mod task;
 pub mod user;
+pub mod user_memory;
 pub mod vga_buffer;
 
 pub fn hlt_loop() -> ! {

@@ -21,14 +21,17 @@ Read order:
    ring-3 pieces of `src/gdt.rs`, `src/interrupts.rs`, and the scheduler
 9. [elf_loader.md](elf_loader.md): `src/elf.rs`, generated embedded ELF
    fixtures, and `tests/elf_loader.rs`
-10. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
+10. [user_memory_and_write.md](user_memory_and_write.md): checked user-buffer
+   copying, `src/user_memory.rs`, and the `write` syscall path
+11. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
    `src/serial.rs`, and `src/qemu.rs`
-11. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
+12. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
    `tests/memory_mapping.rs`, `tests/heap_allocation.rs`, and
    `tests/interrupts.rs`, `tests/cooperative_tasks.rs`, and
    `tests/preemptive_tasks.rs`, `tests/userspace.rs`, and
-   `tests/address_spaces.rs`, and `tests/elf_loader.rs`
-12. [build_config.md](build_config.md): `Cargo.toml`, `build.rs`,
+   `tests/address_spaces.rs`, `tests/elf_loader.rs`, and
+   `tests/user_syscalls.rs`
+13. [build_config.md](build_config.md): `Cargo.toml`, `build.rs`,
    `.cargo/config.toml`,
    `x86_64-vlad_os.json`, and `rust-toolchain.toml`
 

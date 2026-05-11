@@ -77,7 +77,9 @@ memory at `0xb8000`.
 
 The serial module provides COM1 output for QEMU tests. QEMU forwards this to the
 terminal with `-serial stdio`. It uses the same interrupt-safe print pattern as
-VGA output so test diagnostics can also be emitted from interrupt context.
+VGA output so test diagnostics can also be emitted from interrupt context. The
+`write` syscall also uses a byte-oriented serial path and mirrors those syscall
+bytes into a small fixed test buffer so QEMU tests can assert exact output.
 
 ### Line-By-Line
 
@@ -87,7 +89,9 @@ VGA output so test diagnostics can also be emitted from interrupt context.
 | `use spin::Mutex;` | Imports the `no_std` mutex for serial writes. |
 | `use x86_64::instructions::{interrupts, port::Port};` | Imports `without_interrupts` and safe wrappers around x86 I/O port instructions. Port reads and writes are still unsafe operations. |
 | `const COM1: u16 = 0x3f8;` | Base I/O port for the first serial port. |
+| `const OUTPUT_BUFFER_SIZE` | Size of the small syscall-output mirror used only for deterministic test assertions. |
 | `static SERIAL1: Mutex<SerialPort> = ...;` | Global COM1 writer lock used by the serial print macros. |
+| `static OUTPUT_BUFFER: Mutex<OutputBuffer>` | Stores bytes written through `serial::write_bytes`; formatted test diagnostics do not rely on this buffer. |
 | `pub fn init()` | Configures COM1 before tests write to it. |
 | `interrupts::without_interrupts(|| unsafe { ... })` | Keeps serial initialization from being interrupted halfway through the port programming sequence. |
 | `Port::new(COM1 + 1).write(0x00u8);` | Disables serial interrupts. |
@@ -100,11 +104,15 @@ VGA output so test diagnostics can also be emitted from interrupt context.
 | `struct SerialPort;` | Zero-sized type representing COM1 output. |
 | `fn write_byte(&mut self, byte: u8)` | Writes one byte to COM1. |
 | `Port::new(COM1).write(byte);` | Sends the byte to the serial data port. |
+| `fn write_bytes(&mut self, bytes: &[u8])` | Sends arbitrary bytes to COM1 without assuming UTF-8. |
+| `struct OutputBuffer` | Fixed-size byte mirror for syscall-write tests. It is intentionally not a logging subsystem. |
 | `impl fmt::Write for SerialPort` | Lets formatted strings write to serial. |
 | `for byte in s.bytes()` | Sends a string one byte at a time. |
 | `pub fn _print(args: fmt::Arguments)` | Internal formatter entry point used by serial macros. |
 | `interrupts::without_interrupts(|| { ... })` | Prevents hardware IRQ re-entry while the serial lock is held. |
 | `SERIAL1.lock().write_fmt(args).unwrap();` | Formats directly into the serial writer while holding the lock. |
+| `pub fn write_bytes(bytes: &[u8])` | Byte-oriented output used by `SYS_WRITE`; it writes to COM1 and records bytes in the fixed mirror. |
+| `clear_output_buffer()` and `output_contains(...)` | Test helpers used by syscall integration tests to assert user-visible write output deterministically. |
 | `macro_rules! serial_print` | Exports `serial_print!` for test kernels. |
 | `macro_rules! serial_println` | Exports newline-aware serial printing. |
 

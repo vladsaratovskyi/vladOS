@@ -161,6 +161,13 @@ impl Task {
         }
     }
 
+    pub(crate) fn user_address_space(&self) -> Option<&AddressSpace> {
+        match &self.address_space {
+            TaskAddressSpace::Kernel => None,
+            TaskAddressSpace::User(address_space) => Some(address_space),
+        }
+    }
+
     pub(crate) fn set_exit_code(&mut self, exit_code: u64) {
         self.exit_code = Some(exit_code);
     }

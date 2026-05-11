@@ -79,15 +79,17 @@ See [address_spaces.md](address_spaces.md) for page-table construction.
 
 ## Syscall Flow
 
-`src/syscall.rs` defines vector `0x80` and two syscall numbers:
+`src/syscall.rs` defines vector `0x80` and three syscall numbers:
 
 - `0`: `Yield`
 - `1`: `Exit`
+- `2`: `Write`
 
 The calling convention is intentionally small: syscall number in `rax`, return
 value in `rax`, and `exit` uses `rdi` as a minimal exit code for deterministic
-tests. The current user code uses inline/global assembly `int 0x80` wrappers
-rather than calling kernel scheduler functions directly.
+tests. `write` uses `rdi` for fd, `rsi` for the user buffer, and `rdx` for the
+byte length. The current user code uses inline/global assembly `int 0x80`
+wrappers rather than calling kernel scheduler functions directly.
 
 The flow is:
 
@@ -100,11 +102,16 @@ The flow is:
 7. `Yield` returns through the normal scheduler switch path.
 8. `Exit` stores `rdi` as the task exit code, marks the current task
    `Finished`, and resumes the next ready task.
-9. Assembly restores the selected trap frame and finishes with `iretq`.
+9. `Write` validates and copies the user buffer before returning a byte count
+   or negative errno-like value in saved `rax`.
+10. Assembly restores the selected trap frame and finishes with `iretq`.
 
 This uses software interrupts instead of `syscall/sysret` because the kernel
 already has a full trap-frame interrupt path. It keeps this step about safe
 privilege transitions rather than fast syscall entry.
+
+See [user_memory_and_write.md](user_memory_and_write.md) for the checked
+user-buffer boundary used by `Write`.
 
 ## User Fault Flow
 

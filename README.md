@@ -43,7 +43,8 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
   returns through the interrupt-return path
 - minimal ring-3 user task foundation using the current trap-frame restore path
 - interrupt-based syscall path on vector `0x80`
-- user syscalls for `yield` and `exit`
+- user syscalls for `yield`, `exit`, and `write`
+- checked page-by-page user-memory copying for syscall buffers
 - contained user-mode general-protection fault handling
 - isolated user address spaces with one page-table root per user task
 - CR3 switching in the scheduler
@@ -66,6 +67,9 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - isolated QEMU integration test for embedded ELF loading, bad ELF rejection,
   per-process data isolation, read-only segment faults, and preemption across
   ELF-backed address spaces
+- isolated QEMU integration test for `write`, bad syscall pointers, read-only
+  user buffers, cross-page user buffers, checked kernel-to-user copying, and
+  preemption across syscall-heavy user tasks
 - no APIC, demand paging, dynamic linking, heap growth, or filesystem
 
 Documentation entry points:
@@ -197,6 +201,12 @@ Run the isolated ELF-loader QEMU test:
 cargo +nightly test --test elf_loader
 ```
 
+Run the isolated user-syscall QEMU test:
+
+```powershell
+cargo +nightly test --test user_syscalls
+```
+
 Expected serial output:
 
 ```text
@@ -210,6 +220,7 @@ preemptive_tasks::timer_preemption...    [ok]
 userspace::ring3_syscalls_and_faults...  [ok]
 address_spaces::isolation_and_faults...  [ok]
 elf_loader::embedded_user_elfs...        [ok]
+user_syscalls::write_and_user_memory...  [ok]
 ```
 
 The normal kernel boot does not intentionally double fault or page fault. These
@@ -234,6 +245,7 @@ cargo +nightly test --test preemptive_tasks
 cargo +nightly test --test userspace
 cargo +nightly test --test address_spaces
 cargo +nightly test --test elf_loader
+cargo +nightly test --test user_syscalls
 ```
 
 `cargo +nightly run` boots the normal kernel in QEMU. It does not exit on its

@@ -88,6 +88,11 @@ created user-accessible. Kernel P4 entries stay supervisor-only.
 the physical-memory direct map and reads the physical frame without switching
 CR3.
 
+`AddressSpace::translate_user(...)` is the lower-level checked-walk primitive
+used by the syscall user-memory layer. It returns the translated physical
+address plus the leaf PTE flags, which lets the kernel reject writes to
+read-only user pages without taking a kernel page fault.
+
 `AddressSpace::map_user_region(...)`, `copy_to_user(...)`, and
 `zero_user_range(...)` are loader helpers. They let the ELF loader allocate
 eager user pages, copy file-backed segment bytes, and zero BSS ranges without

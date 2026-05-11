@@ -64,6 +64,8 @@ binary target, integration test kernels, and panic strategy.
 | `harness = false` | Makes the address-space test a bootable kernel that exits QEMU after CR3 switching, user isolation, and user page-fault checks. |
 | `[[test]] name = "elf_loader"` | Declares the embedded ELF-loader integration test target. |
 | `harness = false` | Makes the ELF-loader test a bootable kernel that exits QEMU after validating embedded ELF loading and rejection paths. |
+| `[[test]] name = "user_syscalls"` | Declares the checked user-memory and `write` syscall integration test target. |
+| `harness = false` | Makes the user-syscall test a bootable kernel that exits QEMU after syscall ABI and user-buffer checks. |
 | `[profile.dev] panic = "abort"` | Development builds abort on panic. There is no stack unwinding runtime. |
 | `[profile.release] panic = "abort"` | Release builds also abort on panic. |
 
@@ -88,6 +90,9 @@ or user-program Cargo workspace.
 | `write_private_data()` | Builds a program that stores its initial `rdi` argument at `USER_DATA_BASE`, reads it back, and exits with that value. |
 | `write_readonly_segment()` | Builds a program that writes to a read-only load segment, which should produce a contained user page fault. |
 | `busy_counter()` | Builds a program that increments a private data word forever so timer preemption can be proven. |
+| `write_syscall_suite()` | Builds a program that exercises `write` with fd 1, fd 2, bad pointers, bad fd, read-only source data, and a cross-page buffer. |
+| `write_hello()` | Builds a small writer used by the preemption-with-syscalls test. |
+| `read_data_exit()` | Builds a program that exits with the qword at `USER_DATA_BASE`, used to prove kernel-to-user copy into writable memory. |
 | `elf(entry, segments)` | Writes an ELF64 header, one program header per segment, and page-aligned segment file bytes. |
 | instruction helpers such as `mov_rdi_imm64` | Emit the few x86_64 instruction encodings needed by the tiny user fixtures. |
 

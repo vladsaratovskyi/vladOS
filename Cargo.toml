@@ -64,6 +64,10 @@ harness = false
 name = "elf_loader"
 harness = false
 
+[[test]]
+name = "user_syscalls"
+harness = false
+
 [profile.dev]
 panic = "abort"
 

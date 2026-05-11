@@ -6,11 +6,13 @@ use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::registers::rflags;
 use x86_64::VirtAddr;
 
+use crate::address_space::AddressSpace;
 use crate::arch::x86_64::context::{self, Context};
 use crate::elf::ElfLoadError;
 use crate::gdt;
 use crate::task::{Task, TaskEntry, TaskId, TaskState, UserFaultInfo, MAX_TASKS};
 use crate::user::UserTaskInit;
+use crate::user_memory::UserMemoryError;
 use crate::{hlt_loop, println};
 
 static mut SCHEDULER: Scheduler = Scheduler::new();
@@ -332,6 +334,37 @@ pub fn read_user_u64(task_id: TaskId, address: VirtAddr) -> Option<u64> {
             .get(task_id.0)
             .and_then(|task| task.read_user_u64(address))
     })
+}
+
+pub fn copy_to_user(
+    task_id: TaskId,
+    address: VirtAddr,
+    bytes: &[u8],
+) -> Result<(), UserMemoryError> {
+    cpu_interrupts::without_interrupts(|| unsafe {
+        let scheduler = scheduler_mut();
+        let address_space = scheduler
+            .tasks
+            .get(task_id.0)
+            .and_then(Task::user_address_space)
+            .ok_or(UserMemoryError::Unmapped)?;
+
+        crate::user_memory::copy_to_user(address_space, address, bytes)
+    })
+}
+
+pub(crate) fn with_current_user_address_space<R>(
+    f: impl FnOnce(&AddressSpace) -> R,
+) -> Result<R, UserMemoryError> {
+    unsafe {
+        let scheduler = scheduler_mut();
+        let current = scheduler.current.ok_or(UserMemoryError::Unmapped)?;
+        let address_space = scheduler.tasks[current]
+            .user_address_space()
+            .ok_or(UserMemoryError::Unmapped)?;
+
+        Ok(f(address_space))
+    }
 }
 
 pub(crate) fn run_current_task() -> ! {

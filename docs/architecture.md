@@ -8,8 +8,9 @@ The project is an educational `x86_64` Rust kernel. It is deliberately small:
 there is now a fixed early heap, a legacy PIC/PIT interrupt foundation, a
 stackful task scheduler, and a minimal ring-3 userspace foundation with
 per-user-task address spaces. The current userspace step can load tiny embedded
-ELF64 executables into isolated address spaces. Dynamic heap growth, demand
-paging, dynamic linking, and filesystems are still deferred.
+ELF64 executables into isolated address spaces and safely copy user buffers for
+the first byte-oriented syscall. Dynamic heap growth, demand paging, dynamic
+linking, and filesystems are still deferred.
 
 ## What Exists Today
 
@@ -48,13 +49,15 @@ The kernel currently has:
 - an x86_64 full trap-frame context switch routine for interrupt-time switches
 - minimal user tasks entered through `iretq`
 - software-interrupt syscalls on vector `0x80`
-- user `yield` and `exit` syscalls
+- user `yield`, `exit`, and `write` syscalls
+- checked user-memory range validation and page-by-page copying
 - contained user-mode general-protection faults
 - isolated user address spaces with one page-table root per user task
 - scheduler CR3 switching between kernel and user address spaces
 - contained user-mode page faults
 - a strict embedded ELF64 loader for static user executables
 - process-style user spawning from ELF entry points
+- a narrow `write(fd, user_ptr, len)` path for fd 1 and 2
 - one isolated double-fault test kernel
 - one isolated page-fault test kernel
 - one isolated memory-mapping test kernel
@@ -65,6 +68,7 @@ The kernel currently has:
 - one isolated userspace test kernel
 - one isolated address-space test kernel
 - one isolated ELF-loader test kernel
+- one isolated user-syscall and checked user-memory test kernel
 
 For line-by-line details, start with
 [kernel_entry.md](code_walkthrough/kernel_entry.md).
@@ -179,6 +183,7 @@ The project has both `src/lib.rs` and `src/main.rs`.
 - `elf`
 - `syscall`
 - `user`
+- `user_memory`
 - `arch`
 - `memory`
 - `qemu`
@@ -397,6 +402,7 @@ timer/yield, then Rust dispatch reads the syscall number from `rax`:
 - `0`: yield through the scheduler's existing switch path
 - `1`: mark the current task finished, record `rdi` as a minimal exit code, and
   schedule another task
+- `2`: copy bytes from a checked user buffer to the serial-backed output path
 
 This is intentionally not `syscall/sysret`; software interrupts reuse the
 kernel's current trap-frame machinery and keep this step focused on safe
@@ -459,6 +465,41 @@ trap-frame and CR3-switching paths as earlier user tasks.
 
 See [elf_loader.md](code_walkthrough/elf_loader.md).
 
+## User Memory And `write`
+
+The first useful user-facing syscall is intentionally small:
+
+```text
+rax = 2              syscall number
+rdi = fd             1 for stdout, 2 for stderr
+rsi = user pointer   byte buffer in the current user address space
+rdx = len            byte count
+int 0x80
+```
+
+Return values come back in `rax`. Successful syscalls return a non-negative byte
+count. Errors return negative errno-like values such as `-EBADF`, `-EFAULT`,
+`-EINVAL`, or `-ENOSYS`.
+
+Syscall pointers are never trusted as kernel pointers. The checked user-memory
+helper validates the requested range, walks every touched page in the current
+task's `AddressSpace`, checks user accessibility and write permission when
+needed, translates each chunk to a physical address, and copies through the
+bootloader direct physical-memory mapping.
+
+This preserves a useful distinction:
+
+- direct illegal user access, such as user code writing to read-only memory,
+  still raises a user #PF and fails only that task
+- an illegal pointer passed to `write` returns `-EFAULT`, and the user task may
+  continue
+
+The current `write` accepts only fd 1 and fd 2, treats the buffer as arbitrary
+bytes, and routes both to COM1 serial output. There is no file descriptor table,
+VFS, blocking I/O, `read`, `open`, or `close` yet.
+
+See [user_memory_and_write.md](code_walkthrough/user_memory_and_write.md).
+
 ## Page Fault Reporting
 
 When the CPU raises a page fault, it stores the faulting virtual address in
@@ -515,6 +556,7 @@ The tests are harness-free bootable kernels:
 - `tests/userspace.rs`
 - `tests/address_spaces.rs`
 - `tests/elf_loader.rs`
+- `tests/user_syscalls.rs`
 
 They do not use Rust's normal test harness because this is a `no_std` kernel.
 Instead, each test file defines or generates its own `_start`.
@@ -545,7 +587,10 @@ memory, that unmapped user pages and kernel-only mappings fault only the
 current task, and that preemption still works across CR3 switches. The
 ELF-loader test spawns embedded ELF user programs, checks exit codes and private
 data mappings, rejects bad ELF headers, contains a read-only segment write
-fault, and proves PIT preemption still crosses ELF-backed CR3 roots.
+fault, and proves PIT preemption still crosses ELF-backed CR3 roots. The
+user-syscall test checks `write`, recoverable bad syscall pointers, read-only
+write sources, cross-page buffers, checked kernel-to-user copying, unchanged
+direct user fault semantics, and preemption across syscall-heavy user tasks.
 
 See [tests.md](code_walkthrough/tests.md) and
 [build_config.md](code_walkthrough/build_config.md).
@@ -567,6 +612,7 @@ cargo +nightly test --test preemptive_tasks
 cargo +nightly test --test userspace
 cargo +nightly test --test address_spaces
 cargo +nightly test --test elf_loader
+cargo +nightly test --test user_syscalls
 ```
 
 Use this to boot the normal kernel:
@@ -592,6 +638,7 @@ kernel still does not have:
 - filesystem-backed `execve`
 - copy-on-write
 - a broad syscall API
+- file descriptor tables, `read`, `open`, and `close`
 - keyboard decoding or input queues
 
 Those belong to later roadmap steps in [GENERAL_PLAN.md](../GENERAL_PLAN.md).

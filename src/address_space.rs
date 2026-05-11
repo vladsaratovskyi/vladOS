@@ -24,6 +24,12 @@ pub enum UserCopyError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserTranslation {
+    pub phys: PhysAddr,
+    pub flags: PageTableFlags,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserMapFlags {
     pub readable: bool,
     pub writable: bool,
@@ -204,7 +210,8 @@ impl AddressSpace {
                 .ok_or(UserCopyError::RangeOverflow)?;
             let phys = self
                 .translate_user(VirtAddr::new(dst_addr))
-                .ok_or(UserCopyError::NotMapped)?;
+                .ok_or(UserCopyError::NotMapped)?
+                .phys;
             let page_offset = (phys.as_u64() & (PAGE_SIZE - 1)) as usize;
             let count = core::cmp::min(src.len() - copied, PAGE_SIZE as usize - page_offset);
 
@@ -230,7 +237,8 @@ impl AddressSpace {
                 .ok_or(UserCopyError::RangeOverflow)?;
             let phys = self
                 .translate_user(VirtAddr::new(dst_addr))
-                .ok_or(UserCopyError::NotMapped)?;
+                .ok_or(UserCopyError::NotMapped)?
+                .phys;
             let page_offset = (phys.as_u64() & (PAGE_SIZE - 1)) as usize;
             let count = core::cmp::min(len - zeroed, PAGE_SIZE as usize - page_offset);
 
@@ -271,7 +279,7 @@ impl AddressSpace {
     }
 
     pub fn read_user_u64(&self, address: VirtAddr) -> Option<u64> {
-        let phys = self.translate_user(address)?;
+        let phys = self.translate_user(address)?.phys;
         let offset = phys.as_u64() & 0xfff;
 
         if offset > 4096 - core::mem::size_of::<u64>() as u64 {
@@ -288,7 +296,7 @@ impl AddressSpace {
         self.translate_user(address).is_some()
     }
 
-    fn translate_user(&self, address: VirtAddr) -> Option<PhysAddr> {
+    pub(crate) fn translate_user(&self, address: VirtAddr) -> Option<UserTranslation> {
         memory::with_state(|state| {
             let page = Page::<Size4KiB>::containing_address(address);
             let level_4 = unsafe { state.page_table(self.level_4_frame) };
@@ -317,7 +325,10 @@ impl AddressSpace {
             }
 
             let page_offset = address.as_u64() & 0xfff;
-            Some(p1_entry.frame().ok()?.start_address() + page_offset)
+            Some(UserTranslation {
+                phys: p1_entry.frame().ok()?.start_address() + page_offset,
+                flags: p1_entry.flags(),
+            })
         })
     }
 }

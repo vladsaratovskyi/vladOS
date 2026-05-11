@@ -18,9 +18,10 @@ kernel initializes CPU tables, prints memory diagnostics, initializes the fixed
 heap, enables the legacy timer and keyboard interrupt path, triggers a
 breakpoint proof, runs a short cooperative task demo, and halts. Preemptive
 task switching is available for tests and later demos, but normal boot does not
-enable it yet. The minimal userspace, address-space isolation, and embedded ELF
-loader paths are exercised by `tests/userspace.rs`, `tests/address_spaces.rs`,
-and `tests/elf_loader.rs` instead of the normal boot demo.
+enable it yet. The minimal userspace, address-space isolation, embedded ELF
+loader, and user syscall paths are exercised by `tests/userspace.rs`,
+`tests/address_spaces.rs`, `tests/elf_loader.rs`, and
+`tests/user_syscalls.rs` instead of the normal boot demo.
 
 ### Dependencies
 
@@ -133,6 +134,7 @@ and provides the allocation error handler shared by all bootable kernels.
 | `pub mod syscall;` | Exposes the minimal `int 0x80` syscall numbers and dispatcher used by the syscall interrupt path. |
 | `pub mod task;` | Exposes the task ID, task states, task stack size, and task cap. |
 | `pub mod user;` | Exposes the tiny user programs and mapping helpers used by the userspace integration test. |
+| `pub mod user_memory;` | Exposes checked user-buffer validation and copy helpers used by syscalls. |
 | `pub mod vga_buffer;` | Exposes VGA text output and the `print!`/`println!` macros. |
 | `pub fn hlt_loop() -> !` | Defines the shared halt loop. It never returns. |
 | `loop { x86_64::instructions::hlt(); }` | Repeatedly sleeps the CPU until the next interrupt instead of busy-spinning. |

@@ -15,6 +15,7 @@ This page covers:
 - `tests/userspace.rs`
 - `tests/address_spaces.rs`
 - `tests/elf_loader.rs`
+- `tests/user_syscalls.rs`
 
 These tests are full bootable kernels. They do not use Rust's normal test
 harness. Each file defines or generates its own `_start`, installs only the
@@ -445,3 +446,28 @@ scheduled through the existing syscall, fault, and preemption paths.
 | user-memory checks at `USER_DATA_BASE` | Prove the same user virtual address maps to private physical memory per ELF task. |
 | `WRITE_READONLY_SEGMENT_ELF` | Attempts to write to a non-writable load segment; success requires a contained user page fault. |
 | `BUSY_COUNTER_ELF` with preemption enabled | Proves PIT preemption still crosses CR3 roots for ELF-backed tasks. |
+
+## `tests/user_syscalls.rs`
+
+### Purpose
+
+This test proves the checked user-memory syscall boundary and the first
+user-facing `write` syscall.
+
+### Invariants
+
+- Bad syscall pointers return errors to user mode instead of killing the task.
+- Direct illegal user memory access still produces contained user page faults.
+- `write` treats buffers as bytes and supports only fd 1 and 2.
+- Kernel-to-user copying checks writable permissions before touching memory.
+
+### Line-By-Line
+
+| Code | Explanation |
+| --- | --- |
+| `WRITE_SYSCALL_SUITE_ELF` | User program that checks fd 1, fd 2, bad pointers, bad fd, read-only source data, and a cross-page buffer. |
+| `scheduler::copy_to_user(... USER_DATA_BASE, b"x")` | Attempts to write into the suite's read-only data segment and expects `NotWritable`. |
+| `serial::output_contains(...)` | Checks the fixed syscall-output mirror for deterministic write results. |
+| `READ_DATA_EXIT_ELF` | Reads a writable user data qword and exits with it after the kernel copies bytes there. |
+| `WRITE_READONLY_SEGMENT_ELF` | Verifies direct user writes to read-only pages still fail through the page-fault path. |
+| `BUSY_COUNTER_ELF` and `WRITE_HELLO_ELF` | Prove timer preemption and CR3 switching still work while another ELF task executes `write`. |
