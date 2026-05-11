@@ -7,6 +7,8 @@ pub const EBADF: isize = 9;
 pub const EFAULT: isize = 14;
 pub const EINVAL: isize = 22;
 pub const ENOSYS: isize = 38;
+pub const ECHILD: isize = 10;
+pub const WNOHANG: usize = 1;
 
 const WRITE_CHUNK_SIZE: usize = 256;
 
@@ -18,6 +20,8 @@ pub enum SyscallNumber {
     Yield = 0,
     Exit = 1,
     Write = 2,
+    GetPid = 3,
+    WaitPid = 4,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +29,7 @@ pub enum SysError {
     BadFd,
     Fault,
     Invalid,
+    Child,
     NoSys,
 }
 
@@ -34,11 +39,12 @@ impl SysError {
             Self::BadFd => EBADF,
             Self::Fault => EFAULT,
             Self::Invalid => EINVAL,
+            Self::Child => ECHILD,
             Self::NoSys => ENOSYS,
         }
     }
 
-    fn raw_return(self) -> u64 {
+    pub(crate) fn raw_return(self) -> u64 {
         (-(self.errno() as i64)) as u64
     }
 }
@@ -49,6 +55,8 @@ impl SyscallNumber {
             value if value == Self::Yield as u64 => Some(Self::Yield),
             value if value == Self::Exit as u64 => Some(Self::Exit),
             value if value == Self::Write as u64 => Some(Self::Write),
+            value if value == Self::GetPid as u64 => Some(Self::GetPid),
+            value if value == Self::WaitPid as u64 => Some(Self::WaitPid),
             _ => None,
         }
     }
@@ -72,6 +80,18 @@ pub fn dispatch(frame_rsp: u64) -> u64 {
 
             frame_rsp
         }
+        Some(SyscallNumber::GetPid) => {
+            frame.rax = crate::scheduler::current_process_id()
+                .map(|pid| pid.0 as u64)
+                .unwrap_or_else(|| SysError::Child.raw_return());
+            frame_rsp
+        }
+        Some(SyscallNumber::WaitPid) => crate::scheduler::on_syscall_waitpid(
+            frame_rsp,
+            crate::process::ProcessId(frame.rdi as usize),
+            crate::process::wait_status_address(frame.rsi),
+            frame.rdx as usize,
+        ),
         None => {
             frame.rax = SysError::NoSys.raw_return();
             frame_rsp

@@ -17,16 +17,17 @@ first version was cooperative only; the current version keeps `yield_now()` but
 also lets the PIT timer preempt a running task when preemption is explicitly
 enabled.
 
-There is still no sleep queue, priority scheduling, process abstraction, or SMP
-support. Every task has its own kernel stack; user tasks also have a small
-mapped user stack inside their own address space.
+There is still no sleep queue, priority scheduling, multiple user threads per
+process, or SMP support. Every task has its own kernel stack; user process main
+tasks also have a small mapped user stack inside their process address space.
 
 ## Invariants
 
 - Each task owns a dedicated 8 KiB heap-backed kernel stack.
 - User tasks use that kernel stack as their `TSS.rsp0` entry stack.
 - At most eight tasks can be spawned while the heap is fixed at 100 KiB.
-- Finished and failed tasks are skipped and never resumed.
+- Blocked, finished, and failed tasks are skipped and never resumed as runnable
+  work until a specific wakeup makes a blocked task ready again.
 - Task stacks are retained for the lifetime of the scheduler.
 - Preemption is disabled until `scheduler::enable_preemption()` is called.
 - Scheduler mutations run with local interrupts disabled on this single CPU.
@@ -38,10 +39,9 @@ mapped user stack inside their own address space.
 small:
 
 - `TaskId(pub usize)` is assigned from the task table index.
-- `TaskState` is `Ready`, `Running`, `Finished`, or `Failed`.
+- `TaskState` is `Ready`, `Running`, `Blocked`, `Finished`, or `Failed`.
 - `TaskKind` distinguishes kernel tasks from user tasks.
-- `TaskAddressSpace` distinguishes the kernel CR3 root from a user
-  `AddressSpace`.
+- User tasks carry the owning `ProcessId`; kernel tasks have no process ID.
 - `TaskEntry = fn()` is a plain kernel function.
 
 `Task::new(id, entry, rflags)` allocates an 8 KiB stack and calls
@@ -54,8 +54,9 @@ stack.
 initial user `TrapFrame` with ring-3 code/data selectors, a user instruction
 pointer, a user stack pointer, and an initial argument in `rdi`. The scheduler
 restores this frame through `iretq`, so first entry into user mode uses the same
-path as every later interrupt return. User tasks also carry an `AddressSpace`,
-an optional exit code, and optional user-fault metadata.
+path as every later interrupt return. User tasks also carry an optional exit
+code and optional user-fault metadata; their address space is resolved through
+the owning process.
 
 ## `src/scheduler.rs`
 
@@ -64,6 +65,7 @@ The scheduler is a single global `Scheduler`:
 ```rust
 struct Scheduler {
     tasks: Vec<Task>,
+    processes: ProcessTable,
     current: Option<usize>,
     main_context: Context,
     preemption_enabled: bool,
@@ -71,7 +73,8 @@ struct Scheduler {
 }
 ```
 
-`tasks` is the fixed-size early task table, `current` tracks the running task,
+`tasks` is the fixed-size early task table, `processes` stores process
+lifecycle state and user address spaces, `current` tracks the running task,
 `main_context` stores the boot stack so `scheduler::run()` can return after all
 tasks finish, `preemption_enabled` gates timer-driven switching, and
 `current_level_4_frame` avoids unnecessary CR3 reloads.
@@ -89,9 +92,9 @@ the first restore.
 `spawn_user(init)` keeps the older explicit user-task path used by the
 userspace tests. `spawn_user_elf(name, elf_bytes)` and
 `spawn_user_elf_with_arg(name, elf_bytes, arg0)` call the ELF loader first, then
-register the returned `UserTaskInit` through the same user-task insertion path.
-The scheduler does not know whether a user task came from a built-in byte image
-or an ELF file after the task has been created.
+create a root process and register the returned `UserTaskInit` as that
+process's main task. The scheduler does not know whether a user task came from
+a built-in byte image or an ELF file after the task has been created.
 
 `run()` chooses the first ready task, marks it running, updates `TSS.rsp0` to
 that task's kernel-stack top, switches CR3 if the selected task uses another
@@ -108,9 +111,16 @@ checking the preemption gate because an explicit yield is always allowed.
 `on_syscall_yield(frame_rsp)` reuses the same switching path for user
 `int 0x80` yield. `exit_current_from_interrupt(frame_rsp, exit_code)` and
 `fail_current_with_fault(frame_rsp, fault_info)` mark the current task terminal,
-record user-visible status for tests, and select another ready task. If no
-runnable task remains, the scheduler switches CR3 back to the kernel root before
-returning to the boot stack.
+record user-visible status for tests, mark the owning process zombie when there
+is one, wake a blocked parent if it is waiting for that process, and select
+another ready task. If no runnable task remains, the scheduler switches CR3
+back to the kernel root before returning to the boot stack.
+
+`on_syscall_waitpid(...)` handles the only blocking syscall so far. If the
+requested child is still running and the call is not `WNOHANG`, the parent task
+becomes `Blocked(WaitReason::ChildExit { ... })`. Child exit later writes the
+wait status to checked user memory, patches the blocked task's saved `rax`, and
+marks it `Ready`.
 
 ## `src/arch/x86_64/context.rs`
 

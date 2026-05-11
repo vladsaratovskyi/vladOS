@@ -32,6 +32,8 @@ The syscall entry path is still `int 0x80`:
 | `rax = 0` | `yield` |
 | `rax = 1` | `exit`, with exit code in `rdi` |
 | `rax = 2` | `write` |
+| `rax = 3` | `getpid` |
+| `rax = 4` | `waitpid` |
 | `rdi` | `write` fd; only 1 and 2 are accepted |
 | `rsi` | `write` user buffer pointer |
 | `rdx` | `write` byte length |

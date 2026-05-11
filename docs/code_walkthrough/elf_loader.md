@@ -98,6 +98,9 @@ The generated programs use the current syscall ABI:
 | --- | --- |
 | `rax = 0` | syscall `yield` |
 | `rax = 1` | syscall `exit` |
+| `rax = 2` | syscall `write` |
+| `rax = 3` | syscall `getpid` |
+| `rax = 4` | syscall `waitpid` |
 | `rdi` | exit code for `exit`, or initial test argument before the program changes it |
 | `int 0x80` | enter the kernel syscall path |
 
@@ -111,6 +114,8 @@ Fixtures include:
 - `busy_counter.elf`: increments `USER_DATA_BASE` forever so timer preemption
   can be observed.
 - `bad_machine.elf`: has a wrong `e_machine` value for rejection coverage.
+- process-lifecycle fixtures: exercise `getpid`, exact-child `waitpid`,
+  zombie status, and contained user faults.
 
 ## `tests/elf_loader.rs`
 

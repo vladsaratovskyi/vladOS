@@ -17,8 +17,9 @@ return to CPL0 through a software interrupt, terminate user tasks, and contain a
 user-mode privileged-instruction fault. User tasks now run in isolated address
 spaces; this file focuses on the user entry and syscall layer. It deliberately
 keeps the syscall ABI small. ELF loading is covered separately in
-[elf_loader.md](elf_loader.md); there is still no `syscall/sysret`, process
-model, or broad POSIX API.
+[elf_loader.md](elf_loader.md), and process lifecycle is covered in
+[process_lifecycle.md](process_lifecycle.md). There is still no
+`syscall/sysret`, fork, exec replacement, or broad POSIX API.
 
 ## Core Model
 
@@ -79,17 +80,21 @@ See [address_spaces.md](address_spaces.md) for page-table construction.
 
 ## Syscall Flow
 
-`src/syscall.rs` defines vector `0x80` and three syscall numbers:
+`src/syscall.rs` defines vector `0x80` and five syscall numbers:
 
 - `0`: `Yield`
 - `1`: `Exit`
 - `2`: `Write`
+- `3`: `GetPid`
+- `4`: `WaitPid`
 
 The calling convention is intentionally small: syscall number in `rax`, return
-value in `rax`, and `exit` uses `rdi` as a minimal exit code for deterministic
-tests. `write` uses `rdi` for fd, `rsi` for the user buffer, and `rdx` for the
-byte length. The current user code uses inline/global assembly `int 0x80`
-wrappers rather than calling kernel scheduler functions directly.
+value in `rax`, and `exit` uses `rdi` as a minimal process exit code for
+deterministic tests. `write` uses `rdi` for fd, `rsi` for the user buffer, and
+`rdx` for the byte length. `waitpid` uses `rdi` for an exact child PID, `rsi`
+for an optional wait-status pointer, and `rdx` for options. The current user
+code uses inline/global assembly `int 0x80` wrappers rather than calling kernel
+scheduler functions directly.
 
 The flow is:
 
@@ -100,11 +105,15 @@ The flow is:
 5. `syscall_interrupt_entry` pushes all general-purpose registers.
 6. `syscall_interrupt_rust` calls `syscall::dispatch(frame_rsp)`.
 7. `Yield` returns through the normal scheduler switch path.
-8. `Exit` stores `rdi` as the task exit code, marks the current task
-   `Finished`, and resumes the next ready task.
+8. `Exit` stores `rdi` as the task exit code, marks the owning process zombie,
+   marks the current task `Finished`, wakes any parent waiting for that child,
+   and resumes the next ready task.
 9. `Write` validates and copies the user buffer before returning a byte count
    or negative errno-like value in saved `rax`.
-10. Assembly restores the selected trap frame and finishes with `iretq`.
+10. `GetPid` returns the current process ID.
+11. `WaitPid` either returns immediately, reaps a zombie child, or blocks the
+    parent task until a specific child exits.
+12. Assembly restores the selected trap frame and finishes with `iretq`.
 
 This uses software interrupts instead of `syscall/sysret` because the kernel
 already has a full trap-frame interrupt path. It keeps this step about safe
@@ -123,10 +132,11 @@ state. `TrapFrameWithErrorCode` documents that layout:
 3. CPU-pushed `rip`, `cs`, `rflags`, `rsp`, and `ss`.
 
 `general_protection_rust` checks the saved `cs` privilege bits. If the fault
-came from CPL3, the scheduler marks the current task `Failed` and resumes
-another ready task. If the fault came from CPL0, the kernel prints diagnostics
-and halts. Page faults use the same error-code trap-frame path now: CPL3 #PF is
-task-local failure, while CPL0 #PF remains fatal.
+came from CPL3, the scheduler marks the current task `Failed`, marks the
+owning process `Zombie(ProcessExit::Faulted)`, and resumes another ready task.
+If the fault came from CPL0, the kernel prints diagnostics and halts. Page
+faults use the same error-code trap-frame path now: CPL3 #PF is process-local
+failure, while CPL0 #PF remains fatal.
 
 ## Test Coverage
 

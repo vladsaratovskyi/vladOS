@@ -9,12 +9,14 @@ This page covers `src/address_space.rs` and the global address-space support in
 ## Purpose
 
 The first userspace milestone entered CPL3 but still used the kernel's active
-page table. This milestone gives every user task a separate P4 root, switches
-CR3 in the scheduler, and treats user page faults as task-local failures.
+page table. The address-space milestone gave every user task a separate P4
+root; the current process layer stores that root on the owning process. The
+scheduler still switches CR3 when it selects a task, and user page faults remain
+contained.
 
-The next layer can now load embedded ELF binaries into these address spaces,
-but there is still no demand paging, copy-on-write, `fork`, filesystem-backed
-`execve`, or process object.
+The kernel can now load embedded ELF binaries into these address spaces, but
+there is still no demand paging, copy-on-write, `fork`, or filesystem-backed
+`execve`.
 
 ## Layout
 
@@ -22,7 +24,7 @@ The kernel reserves P4 index 1 for user mappings:
 
 ```text
 P4 index 0, high indexes, etc.  shared kernel mappings, supervisor-only
-P4 index 1                     per-task user code/data/stack mappings
+P4 index 1                     per-process user code/data/stack mappings
 ```
 
 Every user address space uses the same user virtual addresses:
@@ -36,7 +38,7 @@ USER_TEST_PAGE_BASE  optional private test page
 USER_STACK_TOP       top of the private 8 KiB user stack
 ```
 
-Because each task has a distinct P4 root, two tasks can both use
+Because each user process has a distinct P4 root, two processes can both use
 `USER_DATA_BASE` while reaching different physical frames.
 
 ## `src/memory.rs`
@@ -101,8 +103,9 @@ initialize read-only user pages before user mode ever runs.
 
 ## CR3 Switching
 
-Tasks carry either the kernel address space or a user `AddressSpace`. Whenever
-the scheduler selects a task, it:
+Kernel tasks use the kernel address space. User tasks carry a `ProcessId`, and
+the scheduler resolves the selected task's P4 through the process table.
+Whenever the scheduler selects a task, it:
 
 1. saves the old trap frame as before
 2. chooses the next ready task as before
@@ -119,8 +122,9 @@ it switches CR3 back to the kernel P4 first.
 Production #PF now uses an explicit error-code trap-frame stub, matching the
 #GP path. The Rust half reads CR2 and inspects saved `cs`:
 
-- CPL3 #PF records `UserFaultInfo`, marks the current task `Failed`, and
-  schedules the next ready task.
+- CPL3 #PF records `UserFaultInfo`, marks the current task `Failed`, marks the
+  owning process `Zombie(ProcessExit::Faulted)`, and schedules the next ready
+  task.
 - CPL0 #PF prints diagnostics and halts, preserving the old fatal kernel
   behavior.
 

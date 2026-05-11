@@ -23,15 +23,18 @@ Read order:
    fixtures, and `tests/elf_loader.rs`
 10. [user_memory_and_write.md](user_memory_and_write.md): checked user-buffer
    copying, `src/user_memory.rs`, and the `write` syscall path
-11. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
+11. [process_lifecycle.md](process_lifecycle.md): `src/process.rs`, the
+   process-aware scheduler pieces, `getpid`, `waitpid`, and
+   `tests/process_lifecycle.rs`
+12. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
    `src/serial.rs`, and `src/qemu.rs`
-12. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
+13. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
    `tests/memory_mapping.rs`, `tests/heap_allocation.rs`, and
    `tests/interrupts.rs`, `tests/cooperative_tasks.rs`, and
    `tests/preemptive_tasks.rs`, `tests/userspace.rs`, and
    `tests/address_spaces.rs`, `tests/elf_loader.rs`, and
-   `tests/user_syscalls.rs`
-13. [build_config.md](build_config.md): `Cargo.toml`, `build.rs`,
+   `tests/user_syscalls.rs`, and `tests/process_lifecycle.rs`
+14. [build_config.md](build_config.md): `Cargo.toml`, `build.rs`,
    `.cargo/config.toml`,
    `x86_64-vlad_os.json`, and `rust-toolchain.toml`
 

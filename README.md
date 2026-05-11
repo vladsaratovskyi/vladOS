@@ -45,6 +45,9 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - interrupt-based syscall path on vector `0x80`
 - user syscalls for `yield`, `exit`, and `write`
 - checked page-by-page user-memory copying for syscall buffers
+- minimal process layer above the task scheduler
+- per-process IDs, parent/child metadata, zombie exit state, `getpid`, and
+  exact-child `waitpid`
 - contained user-mode general-protection fault handling
 - isolated user address spaces with one page-table root per user task
 - CR3 switching in the scheduler
@@ -70,6 +73,9 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - isolated QEMU integration test for `write`, bad syscall pointers, read-only
   user buffers, cross-page user buffers, checked kernel-to-user copying, and
   preemption across syscall-heavy user tasks
+- isolated QEMU integration test for process IDs, parent/child metadata,
+  blocking and nonblocking `waitpid`, zombie reaping, bad wait-status pointers,
+  and faulted-child wait status
 - no APIC, demand paging, dynamic linking, heap growth, or filesystem
 
 Documentation entry points:
@@ -207,6 +213,12 @@ Run the isolated user-syscall QEMU test:
 cargo +nightly test --test user_syscalls
 ```
 
+Run the isolated process-lifecycle QEMU test:
+
+```powershell
+cargo +nightly test --test process_lifecycle
+```
+
 Expected serial output:
 
 ```text
@@ -221,6 +233,7 @@ userspace::ring3_syscalls_and_faults...  [ok]
 address_spaces::isolation_and_faults...  [ok]
 elf_loader::embedded_user_elfs...        [ok]
 user_syscalls::write_and_user_memory...  [ok]
+process_lifecycle::getpid_waitpid_zombies... [ok]
 ```
 
 The normal kernel boot does not intentionally double fault or page fault. These
@@ -246,6 +259,7 @@ cargo +nightly test --test userspace
 cargo +nightly test --test address_spaces
 cargo +nightly test --test elf_loader
 cargo +nightly test --test user_syscalls
+cargo +nightly test --test process_lifecycle
 ```
 
 `cargo +nightly run` boots the normal kernel in QEMU. It does not exit on its

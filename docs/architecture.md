@@ -7,9 +7,10 @@ is meant to be read before the line-by-line walkthroughs in
 The project is an educational `x86_64` Rust kernel. It is deliberately small:
 there is now a fixed early heap, a legacy PIC/PIT interrupt foundation, a
 stackful task scheduler, and a minimal ring-3 userspace foundation with
-per-user-task address spaces. The current userspace step can load tiny embedded
-ELF64 executables into isolated address spaces and safely copy user buffers for
-the first byte-oriented syscall. Dynamic heap growth, demand paging, dynamic
+per-process address spaces. The current userspace step can load tiny embedded
+ELF64 executables into isolated address spaces, safely copy user buffers for
+the first byte-oriented syscall, and track single-threaded user processes
+through exit and `waitpid`. Dynamic heap growth, demand paging, dynamic
 linking, and filesystems are still deferred.
 
 ## What Exists Today
@@ -51,8 +52,11 @@ The kernel currently has:
 - software-interrupt syscalls on vector `0x80`
 - user `yield`, `exit`, and `write` syscalls
 - checked user-memory range validation and page-by-page copying
+- a small process table above the task scheduler
+- process IDs, parent/child metadata, zombie state, `getpid`, and exact-child
+  `waitpid`
 - contained user-mode general-protection faults
-- isolated user address spaces with one page-table root per user task
+- isolated user address spaces with one page-table root per user process
 - scheduler CR3 switching between kernel and user address spaces
 - contained user-mode page faults
 - a strict embedded ELF64 loader for static user executables
@@ -69,6 +73,7 @@ The kernel currently has:
 - one isolated address-space test kernel
 - one isolated ELF-loader test kernel
 - one isolated user-syscall and checked user-memory test kernel
+- one isolated process-lifecycle test kernel
 
 For line-by-line details, start with
 [kernel_entry.md](code_walkthrough/kernel_entry.md).
@@ -179,6 +184,7 @@ The project has both `src/lib.rs` and `src/main.rs`.
 - `allocator`
 - `task`
 - `scheduler`
+- `process`
 - `address_space`
 - `elf`
 - `syscall`
@@ -299,14 +305,15 @@ See [exceptions.md](code_walkthrough/exceptions.md) for the handler code.
 
 ## Tasks
 
-The task foundation is stackful. A task is either a kernel function or a tiny
-user entry point plus scheduler metadata:
+The task foundation is stackful. A task is the schedulable execution unit. It
+is either a kernel function or the main task of a single-threaded user process:
 
 - a `TaskId`
-- a `TaskState`: `Ready`, `Running`, `Finished`, or `Failed`
+- a `TaskState`: `Ready`, `Running`, `Blocked`, `Finished`, or `Failed`
 - a saved CPU `Context`
 - a dedicated heap-backed kernel stack
 - either a kernel task entry function or user entry/stack metadata
+- for user tasks, the `ProcessId` of the owning process
 
 Each task gets an 8 KiB kernel stack. That size is deliberately small because
 the current heap is only 100 KiB and this milestone caps the initial task table
@@ -359,12 +366,26 @@ The timer scheduling flow is:
 
 See [tasks.md](code_walkthrough/tasks.md).
 
-## Userspace And Address Spaces
+## Processes, Userspace, And Address Spaces
 
-The userspace foundation still does not add a process model, but user tasks no
-longer share the kernel page table. Each user task owns an `AddressSpace`, which
-is a fresh level-4 page-table frame. Kernel tasks continue using the boot/kernel
-address space.
+The scheduler still schedules tasks, not processes. The process layer owns
+longer-lived user resources and lifecycle metadata:
+
+- `ProcessId`
+- optional parent PID
+- child PID list
+- `Running` or `Zombie` state
+- process exit reason
+- the process address space
+- the process main task
+
+This milestone supports only one user task per process. That keeps the process
+model small while giving later `fork`, `exec`, and file-descriptor work a
+natural owner for address spaces and lifecycle state.
+
+User processes no longer share the kernel page table. Each process owns an
+`AddressSpace`, which is a fresh level-4 page-table frame. Kernel tasks
+continue using the boot/kernel address space.
 
 New user address spaces are built by reserving P4 index 1 for user mappings and
 copying the other kernel P4 entries from the boot address space. Copied kernel
@@ -377,7 +398,7 @@ The resulting layout is:
 
 ```text
 kernel P4 entries: shared supervisor-only kernel mappings
-user P4 index 1:   per-task user code/data/stack
+user P4 index 1:   per-process user code/data/stack
 
 task A USER_DATA_BASE -> frame A
 task B USER_DATA_BASE -> frame B
@@ -400,9 +421,11 @@ invoke it directly. The low-level syscall stub saves the same full trap frame as
 timer/yield, then Rust dispatch reads the syscall number from `rax`:
 
 - `0`: yield through the scheduler's existing switch path
-- `1`: mark the current task finished, record `rdi` as a minimal exit code, and
-  schedule another task
+- `1`: mark the current process zombie with the `rdi` exit code, finish its
+  main task, wake any blocked parent, and schedule another task
 - `2`: copy bytes from a checked user buffer to the serial-backed output path
+- `3`: return the current process ID
+- `4`: wait for one exact child PID
 
 This is intentionally not `syscall/sysret`; software interrupts reuse the
 kernel's current trap-frame machinery and keep this step focused on safe
@@ -411,17 +434,38 @@ privilege transitions.
 A user-mode privileged instruction such as `hlt` raises #GP. A user access to
 an unmapped page or a supervisor-only kernel mapping raises #PF. The kernel
 checks the saved `cs` privilege bits. If the fault came from CPL3, the current
-task is marked `Failed`, fault details are recorded, and another ready task is
-resumed. If the same exception came from CPL0, the kernel preserves the fatal
-behavior and halts.
+task is marked `Failed`, the owning process becomes
+`Zombie(ProcessExit::Faulted)`, fault details are recorded, and another ready
+task is resumed. If the same exception came from CPL0, the kernel preserves the
+fatal behavior and halts.
+
+`waitpid` is deliberately narrow. It supports only exact positive child PIDs,
+options `0` and `WNOHANG`, and a temporary project-local status structure:
+
+```rust
+#[repr(C)]
+pub struct UserWaitStatus {
+    pub kind: u32, // 0 = exited, 1 = faulted
+    pub code: i32, // exit code for normal exits
+}
+```
+
+If the child is still running and `WNOHANG` is set, `waitpid` returns `0`. If
+the child is still running and options are `0`, the parent task is marked
+`Blocked`; it is skipped by round-robin selection until the child exits. Child
+exit completes the wait by copying status to checked user memory, reaping the
+zombie process, patching the parent's saved trap-frame `rax` to the child PID,
+and marking the parent task `Ready`. A bad status pointer returns `-EFAULT`
+without reaping the child. Non-child or already reaped PIDs return `-ECHILD`.
 
 Timer IRQs can also arrive while user code is running. The CPU uses the current
 task's `TSS.rsp0` to enter ring 0, the timer stub saves the interrupted frame,
 and the scheduler may load a different CR3 before resuming a kernel task,
 another user task, or the same task later.
 
-See [userspace.md](code_walkthrough/userspace.md) and
-[address_spaces.md](code_walkthrough/address_spaces.md).
+See [userspace.md](code_walkthrough/userspace.md),
+[address_spaces.md](code_walkthrough/address_spaces.md), and
+[process_lifecycle.md](code_walkthrough/process_lifecycle.md).
 
 ## Embedded ELF Loader
 
@@ -456,12 +500,13 @@ returns a `UserTaskInit` with:
 
 - `rip = e_entry`
 - `rsp = USER_STACK_TOP`
-- the task's fresh address-space root
+- the process's fresh address-space root
 - the initial `rdi` argument used by tests
 
-`scheduler::spawn_user_elf` registers that task with the existing scheduler, so
-syscalls, user page-fault containment, and timer preemption all use the same
-trap-frame and CR3-switching paths as earlier user tasks.
+`scheduler::spawn_user_elf` creates a root process, registers its main task
+with the existing scheduler, and keeps syscalls, user page-fault containment,
+and timer preemption on the same trap-frame and CR3-switching paths as earlier
+user tasks.
 
 See [elf_loader.md](code_walkthrough/elf_loader.md).
 
@@ -557,6 +602,7 @@ The tests are harness-free bootable kernels:
 - `tests/address_spaces.rs`
 - `tests/elf_loader.rs`
 - `tests/user_syscalls.rs`
+- `tests/process_lifecycle.rs`
 
 They do not use Rust's normal test harness because this is a `no_std` kernel.
 Instead, each test file defines or generates its own `_start`.
@@ -591,6 +637,9 @@ fault, and proves PIT preemption still crosses ELF-backed CR3 roots. The
 user-syscall test checks `write`, recoverable bad syscall pointers, read-only
 write sources, cross-page buffers, checked kernel-to-user copying, unchanged
 direct user fault semantics, and preemption across syscall-heavy user tasks.
+The process-lifecycle test checks process IDs, parent/child relationships,
+blocking and nonblocking `waitpid`, zombie persistence before reap, bad status
+pointers, child fault status, and continued scheduling after child exit.
 
 See [tests.md](code_walkthrough/tests.md) and
 [build_config.md](code_walkthrough/build_config.md).
@@ -613,6 +662,7 @@ cargo +nightly test --test userspace
 cargo +nightly test --test address_spaces
 cargo +nightly test --test elf_loader
 cargo +nightly test --test user_syscalls
+cargo +nightly test --test process_lifecycle
 ```
 
 Use this to boot the normal kernel:
@@ -639,6 +689,8 @@ kernel still does not have:
 - copy-on-write
 - a broad syscall API
 - file descriptor tables, `read`, `open`, and `close`
+- `fork`, `exec` replacement, signals, process groups, and multiple user
+  threads per process
 - keyboard decoding or input queues
 
 Those belong to later roadmap steps in [GENERAL_PLAN.md](../GENERAL_PLAN.md).

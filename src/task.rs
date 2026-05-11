@@ -1,9 +1,8 @@
 use alloc::{boxed::Box, vec};
 
-use crate::address_space::AddressSpace;
-use crate::arch::x86_64::context::Context;
+use crate::arch::x86_64::context::{Context, TrapFrame};
 use crate::gdt;
-use crate::memory;
+use crate::process::ProcessId;
 use x86_64::VirtAddr;
 
 pub const TASK_STACK_SIZE: usize = 8 * 1024;
@@ -18,8 +17,17 @@ pub struct TaskId(pub usize);
 pub enum TaskState {
     Ready,
     Running,
+    Blocked(WaitReason),
     Finished,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitReason {
+    ChildExit {
+        child: ProcessId,
+        status_ptr: Option<VirtAddr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +55,7 @@ pub enum TaskKind {
 
 pub enum TaskAddressSpace {
     Kernel,
-    User(AddressSpace),
+    User(ProcessId),
 }
 
 pub struct Task {
@@ -88,7 +96,7 @@ impl Task {
 
     pub fn new_user(
         id: TaskId,
-        address_space: AddressSpace,
+        process_id: ProcessId,
         entry_point: VirtAddr,
         user_stack_top: VirtAddr,
         arg0: u64,
@@ -116,7 +124,7 @@ impl Task {
                 entry_point,
                 user_stack_top,
             },
-            address_space: TaskAddressSpace::User(address_space),
+            address_space: TaskAddressSpace::User(process_id),
             kernel_stack_top,
             exit_code: None,
             fault_info: None,
@@ -147,24 +155,10 @@ impl Task {
         self.kernel_stack_top
     }
 
-    pub(crate) fn level_4_frame(&self) -> x86_64::structures::paging::PhysFrame {
-        match &self.address_space {
-            TaskAddressSpace::Kernel => memory::kernel_level_4_frame(),
-            TaskAddressSpace::User(address_space) => address_space.level_4_frame(),
-        }
-    }
-
-    pub(crate) fn read_user_u64(&self, address: VirtAddr) -> Option<u64> {
-        match &self.address_space {
+    pub(crate) fn process_id(&self) -> Option<ProcessId> {
+        match self.address_space {
             TaskAddressSpace::Kernel => None,
-            TaskAddressSpace::User(address_space) => address_space.read_user_u64(address),
-        }
-    }
-
-    pub(crate) fn user_address_space(&self) -> Option<&AddressSpace> {
-        match &self.address_space {
-            TaskAddressSpace::Kernel => None,
-            TaskAddressSpace::User(address_space) => Some(address_space),
+            TaskAddressSpace::User(process_id) => Some(process_id),
         }
     }
 
@@ -194,6 +188,24 @@ impl Task {
 
     pub(crate) fn set_saved_rsp(&mut self, rsp: u64) {
         self.context.set_rsp(rsp);
+    }
+
+    pub(crate) fn set_saved_rax(&mut self, value: u64) {
+        let frame = self.saved_trap_frame_mut();
+        frame.rax = value;
+    }
+
+    pub(crate) fn set_saved_rdi(&mut self, value: u64) {
+        let frame = self.saved_trap_frame_mut();
+        frame.rdi = value;
+    }
+
+    fn saved_trap_frame_mut(&mut self) -> &mut TrapFrame {
+        // Runnable and blocked tasks always resume through the full trap-frame
+        // restore path. Faulted tasks can have an error-code frame, but this
+        // helper is only used before first run or while a syscall task is
+        // blocked.
+        unsafe { &mut *(self.context.rsp() as *mut TrapFrame) }
     }
 }
 

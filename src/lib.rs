@@ -11,6 +11,7 @@ pub mod elf;
 pub mod gdt;
 pub mod interrupts;
 pub mod memory;
+pub mod process;
 pub mod qemu;
 pub mod scheduler;
 pub mod serial;

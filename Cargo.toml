@@ -68,6 +68,10 @@ harness = false
 name = "user_syscalls"
 harness = false
 
+[[test]]
+name = "process_lifecycle"
+harness = false
+
 [profile.dev]
 panic = "abort"
 

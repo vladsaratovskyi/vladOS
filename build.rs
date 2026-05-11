@@ -14,10 +14,23 @@ const PT_LOAD: u32 = 1;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
+const SYS_YIELD: u32 = 0;
 const SYS_EXIT: u32 = 1;
 const SYS_WRITE: u32 = 2;
+const SYS_GETPID: u32 = 3;
+const SYS_WAITPID: u32 = 4;
 const EBADF: u64 = (-9_i64) as u64;
+const ECHILD: u64 = (-10_i64) as u64;
 const EFAULT: u64 = (-14_i64) as u64;
+const WNOHANG: u64 = 1;
+const WAIT_EXITED: u32 = 0;
+const WAIT_FAULTED: u32 = 1;
+
+const PROCESS_PID_DELAYED: u64 = USER_DATA_BASE;
+const PROCESS_PID_IMMEDIATE: u64 = USER_DATA_BASE + 8;
+const PROCESS_PID_FAULTING: u64 = USER_DATA_BASE + 16;
+const PROCESS_PID_NON_CHILD: u64 = USER_DATA_BASE + 24;
+const PROCESS_STATUS: u64 = USER_DATA_BASE + 32;
 
 struct Segment {
     vaddr: u64,
@@ -41,6 +54,15 @@ fn main() {
     write_fixture(out_dir, "write_syscall_suite.elf", write_syscall_suite());
     write_fixture(out_dir, "write_hello.elf", write_hello());
     write_fixture(out_dir, "read_data_exit.elf", read_data_exit());
+    write_fixture(out_dir, "getpid_ok.elf", getpid_ok());
+    write_fixture(out_dir, "delayed_exit_child.elf", delayed_exit_child());
+    write_fixture(out_dir, "immediate_exit_child.elf", immediate_exit_child());
+    write_fixture(out_dir, "faulting_child.elf", faulting_child());
+    write_fixture(
+        out_dir,
+        "process_wait_parent_suite.elf",
+        process_wait_parent_suite(),
+    );
 
     let mut bad_machine = exit_42();
     bad_machine[18..20].copy_from_slice(&3_u16.to_le_bytes());
@@ -260,6 +282,133 @@ fn busy_counter() -> Vec<u8> {
     )
 }
 
+fn getpid_ok() -> Vec<u8> {
+    let mut code = Vec::new();
+    mov_rax_imm32(&mut code, SYS_GETPID);
+    int_0x80(&mut code);
+    check_rax_nonzero_continue(&mut code);
+    exit_with_code(&mut code, 0);
+
+    elf(
+        USER_CODE_BASE,
+        &[Segment {
+            vaddr: USER_CODE_BASE,
+            flags: PF_R | PF_X,
+            memsz: code.len() as u64,
+            data: code,
+        }],
+    )
+}
+
+fn delayed_exit_child() -> Vec<u8> {
+    let mut code = Vec::new();
+    yield_syscall(&mut code);
+    yield_syscall(&mut code);
+    yield_syscall(&mut code);
+    exit_with_code(&mut code, 42);
+
+    elf(
+        USER_CODE_BASE,
+        &[Segment {
+            vaddr: USER_CODE_BASE,
+            flags: PF_R | PF_X,
+            memsz: code.len() as u64,
+            data: code,
+        }],
+    )
+}
+
+fn immediate_exit_child() -> Vec<u8> {
+    let mut code = Vec::new();
+    exit_with_code(&mut code, 7);
+
+    elf(
+        USER_CODE_BASE,
+        &[Segment {
+            vaddr: USER_CODE_BASE,
+            flags: PF_R | PF_X,
+            memsz: code.len() as u64,
+            data: code,
+        }],
+    )
+}
+
+fn faulting_child() -> Vec<u8> {
+    let mut code = Vec::new();
+    mov_rax_imm64(&mut code, USER_TEST_PAGE_BASE);
+    code.extend_from_slice(&[0x48, 0xc7, 0x00, 0x01, 0x00, 0x00, 0x00]); // mov qword [rax], 1
+    exit_with_code(&mut code, 99);
+
+    elf(
+        USER_CODE_BASE,
+        &[Segment {
+            vaddr: USER_CODE_BASE,
+            flags: PF_R | PF_X,
+            memsz: code.len() as u64,
+            data: code,
+        }],
+    )
+}
+
+fn process_wait_parent_suite() -> Vec<u8> {
+    let mut code = Vec::new();
+
+    mov_rax_imm32(&mut code, SYS_GETPID);
+    int_0x80(&mut code);
+    check_rax_nonzero_continue(&mut code);
+
+    yield_syscall(&mut code);
+
+    waitpid_from_mem(&mut code, PROCESS_PID_NON_CHILD, PROCESS_STATUS, 0);
+    check_rax_eq_continue(&mut code, ECHILD);
+
+    waitpid_from_mem(&mut code, PROCESS_PID_IMMEDIATE, USER_TEST_PAGE_BASE, 0);
+    check_rax_eq_continue(&mut code, EFAULT);
+
+    waitpid_from_mem(&mut code, PROCESS_PID_IMMEDIATE, PROCESS_STATUS, 0);
+    check_rax_eq_mem_continue(&mut code, PROCESS_PID_IMMEDIATE);
+    check_u32_mem_eq_continue(&mut code, PROCESS_STATUS, WAIT_EXITED);
+    check_i32_mem_eq_continue(&mut code, PROCESS_STATUS + 4, 7);
+
+    waitpid_from_mem(&mut code, PROCESS_PID_DELAYED, PROCESS_STATUS, WNOHANG);
+    check_rax_eq_continue(&mut code, 0);
+
+    waitpid_from_mem(&mut code, PROCESS_PID_DELAYED, USER_TEST_PAGE_BASE, 0);
+    check_rax_eq_continue(&mut code, EFAULT);
+
+    waitpid_from_mem(&mut code, PROCESS_PID_DELAYED, PROCESS_STATUS, 0);
+    check_rax_eq_mem_continue(&mut code, PROCESS_PID_DELAYED);
+    check_u32_mem_eq_continue(&mut code, PROCESS_STATUS, WAIT_EXITED);
+    check_i32_mem_eq_continue(&mut code, PROCESS_STATUS + 4, 42);
+
+    waitpid_from_mem(&mut code, PROCESS_PID_DELAYED, PROCESS_STATUS, 0);
+    check_rax_eq_continue(&mut code, ECHILD);
+
+    waitpid_from_mem(&mut code, PROCESS_PID_FAULTING, PROCESS_STATUS, 0);
+    check_rax_eq_mem_continue(&mut code, PROCESS_PID_FAULTING);
+    check_u32_mem_eq_continue(&mut code, PROCESS_STATUS, WAIT_FAULTED);
+
+    exit_with_code(&mut code, 0);
+
+    elf(
+        USER_CODE_BASE,
+        &[
+            Segment {
+                vaddr: USER_CODE_BASE,
+                flags: PF_R | PF_X,
+                memsz: code.len() as u64,
+                data: code,
+            },
+            Segment {
+                vaddr: USER_DATA_BASE,
+                flags: PF_R | PF_W,
+                memsz: 4096,
+                data: vec![0; 64],
+            },
+        ],
+    )
+}
+
 fn elf(entry: u64, segments: &[Segment]) -> Vec<u8> {
     let header_size = 64_usize;
     let program_header_size = 56_usize;
@@ -349,11 +498,50 @@ fn write_syscall(bytes: &mut Vec<u8>, fd: u64, ptr: u64, len: u64) {
     int_0x80(bytes);
 }
 
+fn yield_syscall(bytes: &mut Vec<u8>) {
+    mov_rax_imm32(bytes, SYS_YIELD);
+    int_0x80(bytes);
+}
+
+fn waitpid_from_mem(bytes: &mut Vec<u8>, pid_addr: u64, status_addr: u64, options: u64) {
+    mov_rax_imm32(bytes, SYS_WAITPID);
+    mov_rbx_imm64(bytes, pid_addr);
+    bytes.extend_from_slice(&[0x48, 0x8b, 0x3b]); // mov rdi, [rbx]
+    mov_rsi_imm64(bytes, status_addr);
+    mov_rdx_imm64(bytes, options);
+    int_0x80(bytes);
+}
+
 fn check_rax_eq_continue(bytes: &mut Vec<u8>, expected: u64) {
     mov_rbx_imm64(bytes, expected);
     bytes.extend_from_slice(&[0x48, 0x39, 0xd8]); // cmp rax, rbx
     bytes.extend_from_slice(&[0x74, 21]); // je over the failure exit sequence
     exit_with_code(bytes, 1);
+}
+
+fn check_rax_eq_mem_continue(bytes: &mut Vec<u8>, address: u64) {
+    mov_rbx_imm64(bytes, address);
+    bytes.extend_from_slice(&[0x48, 0x3b, 0x03]); // cmp rax, [rbx]
+    bytes.extend_from_slice(&[0x74, 21]); // je over the failure exit sequence
+    exit_with_code(bytes, 1);
+}
+
+fn check_rax_nonzero_continue(bytes: &mut Vec<u8>) {
+    bytes.extend_from_slice(&[0x48, 0x85, 0xc0]); // test rax, rax
+    bytes.extend_from_slice(&[0x75, 21]); // jne over the failure exit sequence
+    exit_with_code(bytes, 1);
+}
+
+fn check_u32_mem_eq_continue(bytes: &mut Vec<u8>, address: u64, expected: u32) {
+    mov_rbx_imm64(bytes, address);
+    bytes.extend_from_slice(&[0x81, 0x3b]); // cmp dword [rbx], imm32
+    bytes.extend_from_slice(&expected.to_le_bytes());
+    bytes.extend_from_slice(&[0x74, 21]); // je over the failure exit sequence
+    exit_with_code(bytes, 1);
+}
+
+fn check_i32_mem_eq_continue(bytes: &mut Vec<u8>, address: u64, expected: i32) {
+    check_u32_mem_eq_continue(bytes, address, expected as u32);
 }
 
 fn exit_with_code(bytes: &mut Vec<u8>, code: u64) {
