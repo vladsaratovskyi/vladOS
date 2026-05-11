@@ -56,6 +56,10 @@ harness = false
 name = "userspace"
 harness = false
 
+[[test]]
+name = "address_spaces"
+harness = false
+
 [profile.dev]
 panic = "abort"
 

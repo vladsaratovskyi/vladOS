@@ -41,8 +41,8 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 - The IDT must live at a stable address after `lidt`.
 - Simple exception and keyboard handlers use `extern "x86-interrupt"`.
 - The timer IRQ uses an explicit assembly stub because it may switch tasks.
-- The syscall and #GP paths use explicit assembly stubs so they can share the
-  scheduler's full trap-frame context model.
+- The syscall, #GP, and #PF paths use explicit assembly stubs so they can share
+  the scheduler's full trap-frame context model.
 - The syscall IDT entry must be DPL 3 so user code can execute `int 0x80`.
 - The PICs must be remapped away from CPU exception vectors before CPU
   interrupts are enabled.
@@ -50,9 +50,9 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 - Every hardware IRQ handler must send EOI before returning.
 - The breakpoint handler may return.
 - The double-fault handler must not return.
-- The page-fault handler currently must not return because the kernel cannot
+- Kernel page faults currently must not return because the kernel cannot
   recover or map missing pages yet.
-- A #GP from CPL3 is task-local; a #GP from CPL0 remains fatal.
+- #GP and #PF from CPL3 are task-local; the same faults from CPL0 remain fatal.
 
 ## Line-By-Line
 
@@ -67,7 +67,7 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 | `InterruptDescriptorTable` | The table that maps exception and interrupt vectors to handler functions. |
 | `InterruptStackFrame` | A snapshot of CPU state pushed for an exception: instruction pointer, code segment, flags, stack pointer, and stack segment. |
 | `PageFaultErrorCode` | A bitflag value pushed by the CPU for page faults. It explains the access type and cause. |
-| `use crate::arch::x86_64::context::{self, TrapFrameWithErrorCode};` | Imports addresses for explicit interrupt entry stubs and the #GP frame layout with an error code. |
+| `use crate::arch::x86_64::context::{self, TrapFrameWithErrorCode};` | Imports addresses for explicit interrupt entry stubs and the #GP/#PF frame layout with an error code. |
 | `use crate::{gdt, hlt_loop, println};` | Imports local kernel helpers: GDT constants, halt loop, and VGA output. |
 | `use x86_64::PrivilegeLevel;` | Imports DPL values so the syscall IDT entry can allow ring-3 callers. |
 | `pub const PIC_1_OFFSET: u8 = 32;` | Chooses vector 32 as the first hardware IRQ vector. CPU vectors `0..31` are reserved for exceptions, so remapping starts after them. |
@@ -84,7 +84,7 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 | `pub fn init_idt() {` | Public function called by normal boot to initialize exception handling. |
 | `let idt = unsafe { &mut *core::ptr::addr_of_mut!(IDT) };` | Gets a mutable reference to the static IDT through a raw pointer. |
 | `idt.breakpoint.set_handler_fn(breakpoint_handler);` | Installs the vector 3 breakpoint handler. |
-| `idt.page_fault.set_handler_fn(page_fault_handler);` | Installs the vector 14 page-fault handler. |
+| `idt.page_fault.set_handler_addr(...)` | Installs the explicit vector 14 page-fault entry so user #PF can schedule away from the faulting task. |
 | `idt.general_protection_fault.set_handler_addr(...)` | Installs an explicit vector 13 entry so the kernel can inspect the saved CS and contain user-mode #GP faults. |
 | `unsafe { idt.double_fault ... }` | Configures the vector 8 double-fault handler and its IST stack. `set_stack_index` is unsafe because the index must be valid in the loaded TSS. |
 | `.set_handler_fn(double_fault_handler)` | Sets the double-fault handler function. |
@@ -115,15 +115,7 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 | `println!("Error code: {}", error_code);` | Prints the CPU-supplied error code. |
 | `println!("{:#?}", stack_frame);` | Prints the saved CPU state. |
 | `hlt_loop();` | Halts forever. The kernel cannot safely resume from a double fault. |
-| `extern "x86-interrupt" fn page_fault_handler(...)` | Defines the production page-fault handler. |
-| `error_code: PageFaultErrorCode` | Receives CPU-supplied page-fault flags. |
-| `let accessed_address = Cr2::read();` | Reads `CR2`, the faulting virtual address. |
-| `println!("EXCEPTION: PAGE FAULT");` | Labels the page fault in VGA output. |
-| `println!("Accessed Address: {:?}", accessed_address);` | Prints the virtual address that caused the fault. |
-| `println!("Error Code: {:?}", error_code);` | Prints the raw page-fault flags using the crate's debug formatting. |
-| `print_page_fault_error(error_code);` | Calls the local decoder so the bitfield is human-readable. |
-| `println!("{:#?}", stack_frame);` | Prints the saved CPU state at the faulting instruction. |
-| `hlt_loop();` | Halts forever. Returning would retry the same faulting instruction. |
+| `fn fatal_page_fault(...) -> !` | Prints the production kernel page-fault diagnostics and halts forever. Returning would retry the same faulting instruction. |
 | `fn print_page_fault_error(error_code: PageFaultErrorCode)` | Helper that prints decoded page-fault meaning. |
 | `println!("Page fault details:");` | Starts the decoded diagnostic section. |
 | `println!("  reason: {}", page_fault_reason(error_code));` | Prints whether the fault was a not-present page or a protection violation. |
@@ -138,7 +130,7 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 | `CAUSED_BY_WRITE` present | Means the faulting access was a write. |
 | `CAUSED_BY_WRITE` absent | Means the faulting access was a read. |
 | `fn page_fault_mode(...) -> &'static str` | Converts bit 2 into privilege-level meaning. |
-| `USER_MODE` present | Means the fault came from CPL 3 user mode. Page faults are still fatal in this milestone; #GP has the first task-local user-fault policy. |
+| `USER_MODE` present | Means the fault came from CPL 3 user mode. Production #PF also checks saved `cs` so user page faults can be contained to the current task. |
 | `USER_MODE` absent | Means the fault came from supervisor/kernel mode. |
 | `fn yes_no(value: bool) -> &'static str` | Small formatting helper for boolean page-fault details. |
 | `if value { "yes" } else { "no" }` | Converts a boolean into stable user-facing text. |
@@ -151,6 +143,7 @@ initializes the legacy PIC/PIT interrupt path, and installs handlers for:
 | `pub extern "C" fn general_protection_rust(frame_rsp: u64) -> u64` | Rust half of the explicit #GP path. It receives a frame that includes the CPU-pushed error code. |
 | `frame.cs & 0x3 == 0x3` | Checks whether the fault came from CPL3. User-mode #GP marks the current task failed and resumes another task. |
 | kernel-mode #GP branch | Prints diagnostics and halts. A kernel privileged-instruction or descriptor fault is still fatal. |
+| `pub extern "C" fn page_fault_rust(frame_rsp: u64) -> u64` | Rust half of the explicit #PF path. It reads CR2, decodes the error code, contains CPL3 faults, and keeps CPL0 faults fatal. |
 | `extern "x86-interrupt" fn keyboard_interrupt_handler(...)` | Handles keyboard IRQ1. |
 | `Port::new(KEYBOARD_DATA_PORT).read()` | Reads one raw scancode byte from port `0x60`. Reading the data port acknowledges the keyboard controller side of the interrupt. |
 | `println!("keyboard scancode: {:#04x}", scancode);` | Logs the raw scancode for this milestone. Full key decoding is intentionally deferred. |

@@ -1,27 +1,42 @@
 use core::arch::{asm, global_asm};
 
-use x86_64::structures::paging::{
-    mapper::MapToError, FrameAllocator, Mapper, Page, PageSize, PageTableFlags, PhysFrame,
-    Size4KiB, Translate,
-};
+use x86_64::structures::paging::{PageSize, PageTableFlags, Size4KiB};
 use x86_64::VirtAddr;
 
+use crate::address_space::{AddressSpace, AddressSpaceError, USER_P4_INDEX};
 use crate::task::TASK_STACK_SIZE;
 
 const PAGE_SIZE: u64 = Size4KiB::SIZE;
-const USER_SLOT_SIZE: u64 = 0x20_000;
-const USER_CODE_ALIAS_PAGES: u64 = 2;
 
-pub const USER_CODE_START: u64 = 0x0000_4000_0000;
-pub const USER_MARKER_START: u64 = 0x0000_5000_0000;
-pub const USER_STACK_START: u64 = 0x0000_6000_0000;
-pub const USER_STACK_SIZE: usize = TASK_STACK_SIZE;
+pub const USER_BASE: u64 = (USER_P4_INDEX as u64) << 39;
+pub const USER_CODE_BASE: u64 = USER_BASE + 0x0040_0000;
+pub const USER_DATA_BASE: u64 = USER_BASE + 0x0060_0000;
+pub const USER_TEST_PAGE_BASE: u64 = USER_BASE + 0x0070_0000;
+pub const USER_STACK_TOP: u64 = USER_BASE + 0x0080_0000;
+pub const USER_STACK_PAGES: usize = TASK_STACK_SIZE / 4096;
 
 pub const USER_MARKER_RAN: usize = 0;
 pub const USER_MARKER_AFTER_YIELD: usize = 1;
 pub const USER_MARKER_BEFORE_FAULT: usize = 2;
 pub const USER_MARKER_AFTER_FAULT: usize = 3;
 pub const USER_MARKER_BUSY_COUNT: usize = 4;
+
+pub struct UserTaskInit {
+    pub address_space: AddressSpace,
+    pub entry_point: VirtAddr,
+    pub user_stack_top: VirtAddr,
+    pub arg0: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum UserProgram {
+    YieldThenExit,
+    PrivilegedHlt,
+    BusyCounter,
+    WriteReadAa,
+    WriteReadBb,
+    ReadArgExit,
+}
 
 global_asm!(
     r#"
@@ -34,10 +49,12 @@ userspace_yield_exit_entry:
     mov rax, 0
     int 0x80
     mov qword ptr [rdi + 8], 1
+    xor rdi, rdi
     mov rax, 1
     int 0x80
 1:
     jmp 1b
+userspace_yield_exit_entry_end:
     .size userspace_yield_exit_entry, . - userspace_yield_exit_entry
 
     .global userspace_privileged_hlt_entry
@@ -50,6 +67,7 @@ userspace_privileged_hlt_entry:
     int 0x80
 1:
     jmp 1b
+userspace_privileged_hlt_entry_end:
     .size userspace_privileged_hlt_entry, . - userspace_privileged_hlt_entry
 
     .global userspace_busy_counter_entry
@@ -60,7 +78,47 @@ userspace_busy_counter_entry:
     inc rax
     mov qword ptr [rdi + 32], rax
     jmp 1b
+userspace_busy_counter_entry_end:
     .size userspace_busy_counter_entry, . - userspace_busy_counter_entry
+
+    .global userspace_write_read_aa_entry
+    .type userspace_write_read_aa_entry, @function
+userspace_write_read_aa_entry:
+    mov qword ptr [rdi], 0xaa
+    mov rax, 0
+    int 0x80
+    mov rdi, qword ptr [rdi]
+    mov rax, 1
+    int 0x80
+1:
+    jmp 1b
+userspace_write_read_aa_entry_end:
+    .size userspace_write_read_aa_entry, . - userspace_write_read_aa_entry
+
+    .global userspace_write_read_bb_entry
+    .type userspace_write_read_bb_entry, @function
+userspace_write_read_bb_entry:
+    mov qword ptr [rdi], 0xbb
+    mov rax, 0
+    int 0x80
+    mov rdi, qword ptr [rdi]
+    mov rax, 1
+    int 0x80
+1:
+    jmp 1b
+userspace_write_read_bb_entry_end:
+    .size userspace_write_read_bb_entry, . - userspace_write_read_bb_entry
+
+    .global userspace_read_arg_exit_entry
+    .type userspace_read_arg_exit_entry, @function
+userspace_read_arg_exit_entry:
+    mov rdi, qword ptr [rdi]
+    mov rax, 1
+    int 0x80
+1:
+    jmp 1b
+userspace_read_arg_exit_entry_end:
+    .size userspace_read_arg_exit_entry, . - userspace_read_arg_exit_entry
 
     .section .text
 "#
@@ -68,127 +126,58 @@ userspace_busy_counter_entry:
 
 extern "C" {
     static userspace_yield_exit_entry: u8;
+    static userspace_yield_exit_entry_end: u8;
     static userspace_privileged_hlt_entry: u8;
+    static userspace_privileged_hlt_entry_end: u8;
     static userspace_busy_counter_entry: u8;
+    static userspace_busy_counter_entry_end: u8;
+    static userspace_write_read_aa_entry: u8;
+    static userspace_write_read_aa_entry_end: u8;
+    static userspace_write_read_bb_entry: u8;
+    static userspace_write_read_bb_entry_end: u8;
+    static userspace_read_arg_exit_entry: u8;
+    static userspace_read_arg_exit_entry_end: u8;
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum UserProgram {
-    YieldThenExit,
-    PrivilegedHlt,
-    BusyCounter,
-}
-
-impl UserProgram {
-    fn kernel_entry(self) -> VirtAddr {
-        let entry = match self {
-            Self::YieldThenExit => core::ptr::addr_of!(userspace_yield_exit_entry),
-            Self::PrivilegedHlt => core::ptr::addr_of!(userspace_privileged_hlt_entry),
-            Self::BusyCounter => core::ptr::addr_of!(userspace_busy_counter_entry),
-        };
-
-        VirtAddr::from_ptr(entry)
-    }
-
-    fn slot(self) -> usize {
-        match self {
-            Self::YieldThenExit => 0,
-            Self::PrivilegedHlt => 1,
-            Self::BusyCounter => 2,
-        }
-    }
-}
-
-pub fn map_user_program<M, F>(
-    mapper: &mut M,
-    frame_allocator: &mut F,
+pub fn create_user_task(
     program: UserProgram,
-) -> Result<VirtAddr, MapToError<Size4KiB>>
-where
-    M: Mapper<Size4KiB> + Translate,
-    F: FrameAllocator<Size4KiB>,
-{
-    let kernel_entry = program.kernel_entry();
-    let source_page = Page::<Size4KiB>::containing_address(kernel_entry);
-    let offset = kernel_entry.as_u64() - source_page.start_address().as_u64();
-    let alias_start = VirtAddr::new(USER_CODE_START + program.slot() as u64 * USER_SLOT_SIZE);
-    let flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-
-    for page_index in 0..USER_CODE_ALIAS_PAGES {
-        let source_address = source_page.start_address() + page_index * PAGE_SIZE;
-        let physical_address = mapper
-            .translate_addr(source_address)
-            .ok_or(MapToError::FrameAllocationFailed)?;
-        let source_frame = PhysFrame::containing_address(physical_address);
-        let alias_page = Page::containing_address(alias_start + page_index * PAGE_SIZE);
-
-        unsafe {
-            mapper
-                .map_to(alias_page, source_frame, flags, frame_allocator)?
-                .flush();
-        }
-    }
-
-    Ok(alias_start + offset)
+    arg0: u64,
+) -> Result<UserTaskInit, AddressSpaceError> {
+    create_user_task_with_test_page(program, arg0, None)
 }
 
-pub fn map_user_stack<M, F>(
-    mapper: &mut M,
-    frame_allocator: &mut F,
-    stack_slot: usize,
-) -> Result<VirtAddr, MapToError<Size4KiB>>
-where
-    M: Mapper<Size4KiB>,
-    F: FrameAllocator<Size4KiB>,
-{
-    let stack_bottom = VirtAddr::new(USER_STACK_START + stack_slot as u64 * USER_SLOT_SIZE);
-    let flags =
-        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+pub fn create_user_task_with_test_page(
+    program: UserProgram,
+    arg0: u64,
+    test_page_value: Option<u64>,
+) -> Result<UserTaskInit, AddressSpaceError> {
+    let mut address_space = AddressSpace::new_user()?;
+    let entry_point = map_program(&mut address_space, program)?;
 
-    for page_offset in (0..USER_STACK_SIZE).step_by(PAGE_SIZE as usize) {
-        let page = Page::containing_address(stack_bottom + page_offset as u64);
-        let frame = frame_allocator
-            .allocate_frame()
-            .ok_or(MapToError::FrameAllocationFailed)?;
+    let data_frame =
+        address_space.map_zeroed_user_page(VirtAddr::new(USER_DATA_BASE), user_data_flags())?;
+    address_space.write_frame_u64(data_frame, 0);
 
-        unsafe {
-            mapper.map_to(page, frame, flags, frame_allocator)?.flush();
-        }
+    if let Some(value) = test_page_value {
+        let test_frame = address_space
+            .map_zeroed_user_page(VirtAddr::new(USER_TEST_PAGE_BASE), user_data_flags())?;
+        address_space.write_frame_u64(test_frame, value);
     }
 
-    Ok(stack_bottom + USER_STACK_SIZE as u64)
-}
-
-pub fn map_user_marker_page<M, F>(
-    mapper: &mut M,
-    frame_allocator: &mut F,
-) -> Result<VirtAddr, MapToError<Size4KiB>>
-where
-    M: Mapper<Size4KiB>,
-    F: FrameAllocator<Size4KiB>,
-{
-    let page = Page::containing_address(VirtAddr::new(USER_MARKER_START));
-    let frame = frame_allocator
-        .allocate_frame()
-        .ok_or(MapToError::FrameAllocationFailed)?;
-    let flags =
-        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
-
-    unsafe {
-        mapper.map_to(page, frame, flags, frame_allocator)?.flush();
+    let stack_bottom = USER_STACK_TOP - USER_STACK_PAGES as u64 * PAGE_SIZE;
+    for page_index in 0..USER_STACK_PAGES {
+        address_space.map_zeroed_user_page(
+            VirtAddr::new(stack_bottom + page_index as u64 * PAGE_SIZE),
+            user_data_flags(),
+        )?;
     }
 
-    for index in 0..8 {
-        unsafe {
-            marker_ptr(index).write_volatile(0);
-        }
-    }
-
-    Ok(VirtAddr::new(USER_MARKER_START))
-}
-
-pub fn marker_value(index: usize) -> u64 {
-    unsafe { marker_ptr(index).read_volatile() }
+    Ok(UserTaskInit {
+        address_space,
+        entry_point,
+        user_stack_top: VirtAddr::new(USER_STACK_TOP),
+        arg0,
+    })
 }
 
 pub unsafe fn syscall_yield() {
@@ -207,6 +196,7 @@ pub unsafe fn syscall_exit() -> ! {
             "int {vector}",
             vector = const crate::syscall::SYSCALL_VECTOR,
             in("rax") crate::syscall::SyscallNumber::Exit as u64,
+            in("rdi") 0_u64,
         );
     }
 
@@ -215,6 +205,55 @@ pub unsafe fn syscall_exit() -> ! {
     }
 }
 
-fn marker_ptr(index: usize) -> *mut u64 {
-    (USER_MARKER_START as *mut u64).wrapping_add(index)
+fn map_program(
+    address_space: &mut AddressSpace,
+    program: UserProgram,
+) -> Result<VirtAddr, AddressSpaceError> {
+    let code_frame = address_space.map_zeroed_user_page(
+        VirtAddr::new(USER_CODE_BASE),
+        PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+    )?;
+    address_space.write_frame_bytes(code_frame, program.bytes())?;
+
+    Ok(VirtAddr::new(USER_CODE_BASE))
+}
+
+fn user_data_flags() -> PageTableFlags {
+    PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE
+}
+
+impl UserProgram {
+    fn bytes(self) -> &'static [u8] {
+        let (start, end) = match self {
+            Self::YieldThenExit => (
+                core::ptr::addr_of!(userspace_yield_exit_entry),
+                core::ptr::addr_of!(userspace_yield_exit_entry_end),
+            ),
+            Self::PrivilegedHlt => (
+                core::ptr::addr_of!(userspace_privileged_hlt_entry),
+                core::ptr::addr_of!(userspace_privileged_hlt_entry_end),
+            ),
+            Self::BusyCounter => (
+                core::ptr::addr_of!(userspace_busy_counter_entry),
+                core::ptr::addr_of!(userspace_busy_counter_entry_end),
+            ),
+            Self::WriteReadAa => (
+                core::ptr::addr_of!(userspace_write_read_aa_entry),
+                core::ptr::addr_of!(userspace_write_read_aa_entry_end),
+            ),
+            Self::WriteReadBb => (
+                core::ptr::addr_of!(userspace_write_read_bb_entry),
+                core::ptr::addr_of!(userspace_write_read_bb_entry_end),
+            ),
+            Self::ReadArgExit => (
+                core::ptr::addr_of!(userspace_read_arg_exit_entry),
+                core::ptr::addr_of!(userspace_read_arg_exit_entry_end),
+            ),
+        };
+
+        let len = end as usize - start as usize;
+        assert!(len <= 4096);
+
+        unsafe { core::slice::from_raw_parts(start, len) }
+    }
 }

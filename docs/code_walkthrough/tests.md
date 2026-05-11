@@ -13,6 +13,7 @@ This page covers:
 - `tests/cooperative_tasks.rs`
 - `tests/preemptive_tasks.rs`
 - `tests/userspace.rs`
+- `tests/address_spaces.rs`
 
 These tests are full bootable kernels. They do not use Rust's normal test
 harness. Each file defines or generates its own `_start`, installs only the
@@ -358,10 +359,11 @@ running in user mode.
 
 ### Invariants
 
-- The production GDT, TSS, IDT, PIC, PIT, heap, scheduler, syscall, and user
-  mapping helpers are used together.
+- The production GDT, TSS, IDT, PIC, PIT, heap, scheduler, syscall,
+  address-space, and user setup helpers are used together.
 - User code never calls kernel scheduler functions directly.
-- User code and stacks are mapped with `USER_ACCESSIBLE`.
+- User code/data/stacks are mapped with `USER_ACCESSIBLE` in per-task address
+  spaces.
 - Success depends on deterministic marker writes and scheduler state.
 - The privileged `hlt` fault must terminate only the user task, not the kernel.
 
@@ -369,25 +371,45 @@ running in user mode.
 
 | Code | Explanation |
 | --- | --- |
-| `static YIELD_EXIT_ENTRY`, `FAULT_ENTRY`, `BUSY_ENTRY` | Publish mapped user entry addresses to the orchestrator task after setup. |
-| `static USER_STACK_0`, `USER_STACK_1`, `USER_STACK_2` | Store the mapped user-stack tops for the three user tasks in the test. |
-| `static MARKER_PAGE` | Stores the user-accessible marker page pointer passed to user code in `rdi`. |
 | `gdt::init(); interrupts::init_idt(); interrupts::init_pics(); interrupts::init_pit();` | Builds the real descriptor, syscall, and timer paths needed for ring transitions. |
 | `allocator::init_heap(...)` | Maps the fixed heap before task stack allocation. |
-| `user::map_user_marker_page(...)` | Maps one writable user page used for deterministic proof markers. |
-| `user::map_user_program(... YieldThenExit)` | Maps a user-accessible alias for the tiny assembly program that yields and exits through `int 0x80`. |
-| `user::map_user_program(... PrivilegedHlt)` | Maps a user program that attempts privileged `hlt`, expecting a contained #GP. |
-| `user::map_user_program(... BusyCounter)` | Maps a user program that increments forever and never voluntarily yields. |
-| `user::map_user_stack(...)` | Maps separate 8 KiB user stacks for the user tasks. |
+| `memory::init_global(...)` | Stores the direct-map offset and remaining frame allocator so user address spaces can be built later. |
 | `interrupts::enable_interrupts();` | Enables timer delivery before spawning tasks, so user frames can run with IF set. |
 | `scheduler::spawn(orchestrator)` | Creates the kernel task that checks every userspace scenario. |
-| `scheduler::spawn_user(yield_exit, stack_0, marker_page.as_u64())` | Creates the first user task with the marker page in `rdi`. |
+| `user::create_user_task(... YieldThenExit, USER_DATA_BASE)` | Creates an isolated address space with copied user code, private data, and private user stack. |
+| `scheduler::spawn_user(...)` | Adds the prepared user task to the scheduler. |
 | `scheduler::yield_now()` in `orchestrator` | Gives the user task a chance to run and then expects the user syscall yield to switch back. |
 | marker checks after first yield | Prove user code ran before the syscall and had not yet executed the post-yield marker. |
 | marker checks after second yield | Prove the syscall returned to user mode and syscall exit marked the task finished. |
-| spawning the faulting user task | Starts a second user task after the first one exited, staying within the four-task limit. |
-| `scheduler::failed_task_count()` | Verifies the user #GP path marked only that task failed. |
+| spawning the faulting user task | Starts a second user task after the first one exited. |
+| `scheduler::task_fault_info(...)` | Verifies the user #GP path marked only that task failed and recorded the fault. |
 | spawning the busy user task | Starts a user loop that cannot return control by cooperative yield. |
 | `scheduler::enable_preemption(); scheduler::yield_now();` | Gives the busy user task the CPU; the orchestrator can resume only through a timer preemption from CPL3. |
 | `timer_ticks() > start_ticks` and busy marker check | Prove the PIT fired while user code was running and that the busy task made progress. |
 | `serial_println!("[ok]"); exit_qemu(...)` | Reports success only after all userspace checks pass. |
+
+## `tests/address_spaces.rs`
+
+### Purpose
+
+This test proves that user tasks have isolated page-table roots and that CR3
+switching, user page-fault containment, and timer preemption work across those
+roots.
+
+### Invariants
+
+- Every user task is created with a fresh `AddressSpace`.
+- The same user virtual address can map to different physical frames in
+  different tasks.
+- User faults must mark only the faulting task failed.
+- Kernel mappings must remain present for ring 0 but supervisor-only for ring 3.
+
+### Line-By-Line
+
+| Code | Explanation |
+| --- | --- |
+| `memory::init_global(...)` | Makes the direct-map offset and remaining frame allocator available to address-space creation. |
+| `same_virtual_address_is_private()` | Spawns two user tasks that both use `USER_DATA_BASE`; one exits with `0xaa`, the other with `0xbb`. |
+| `unmapped_user_page_is_task_local()` | Gives only task B a mapping at `USER_TEST_PAGE_BASE`; task A faults there while task B exits with the mapped value. |
+| `kernel_mapping_is_supervisor_only()` | Passes a kernel function address to user code and expects a user page fault, proving kernel mappings are not user-accessible. |
+| `preemption_crosses_cr3_roots()` | Runs a busy user loop in one address space and a second user task in another; success requires timer preemption across CR3 roots. |

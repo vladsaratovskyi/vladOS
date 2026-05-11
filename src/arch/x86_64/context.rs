@@ -337,6 +337,37 @@ general_protection_entry:
     jmp restore_interrupt_context
     .size general_protection_entry, . - general_protection_entry
 
+    .global page_fault_entry
+    .type page_fault_entry, @function
+page_fault_entry:
+    // #PF has the same error-code stack shape as #GP. Rust may schedule away
+    // from a user fault, so use the full trap-frame path instead of a normal
+    // `extern "x86-interrupt"` handler.
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rbp
+    push rdi
+    push rsi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    cld
+    mov rdi, rsp
+    mov rbp, rsp
+    and rsp, -16
+    call page_fault_rust
+    mov rsp, rax
+    jmp restore_interrupt_context
+    .size page_fault_entry, . - page_fault_entry
+
 restore_interrupt_context:
     pop r15
     pop r14
@@ -365,6 +396,7 @@ extern "C" {
     fn yield_interrupt_entry();
     fn syscall_interrupt_entry();
     fn general_protection_entry();
+    fn page_fault_entry();
 }
 
 pub unsafe fn switch_from_main(old_context: *mut Context, new_context: *const Context) {
@@ -395,4 +427,8 @@ pub fn syscall_interrupt_entry_addr() -> VirtAddr {
 
 pub fn general_protection_entry_addr() -> VirtAddr {
     VirtAddr::new(general_protection_entry as *const () as u64)
+}
+
+pub fn page_fault_entry_addr() -> VirtAddr {
+    VirtAddr::new(page_fault_entry as *const () as u64)
 }

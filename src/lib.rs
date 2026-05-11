@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+pub mod address_space;
 pub mod allocator;
 pub mod arch;
 pub mod gdt;

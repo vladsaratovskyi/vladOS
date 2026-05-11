@@ -17,15 +17,15 @@ first version was cooperative only; the current version keeps `yield_now()` but
 also lets the PIT timer preempt a running task when preemption is explicitly
 enabled.
 
-There is still no separate user address space, sleep queue, priority
-scheduling, or SMP support. Every task has its own kernel stack; user tasks also
-have a small mapped user stack.
+There is still no sleep queue, priority scheduling, process abstraction, or SMP
+support. Every task has its own kernel stack; user tasks also have a small
+mapped user stack inside their own address space.
 
 ## Invariants
 
 - Each task owns a dedicated 8 KiB heap-backed kernel stack.
 - User tasks use that kernel stack as their `TSS.rsp0` entry stack.
-- At most four tasks can be spawned while the heap is fixed at 100 KiB.
+- At most eight tasks can be spawned while the heap is fixed at 100 KiB.
 - Finished and failed tasks are skipped and never resumed.
 - Task stacks are retained for the lifetime of the scheduler.
 - Preemption is disabled until `scheduler::enable_preemption()` is called.
@@ -40,6 +40,8 @@ small:
 - `TaskId(pub usize)` is assigned from the task table index.
 - `TaskState` is `Ready`, `Running`, `Finished`, or `Failed`.
 - `TaskKind` distinguishes kernel tasks from user tasks.
+- `TaskAddressSpace` distinguishes the kernel CR3 root from a user
+  `AddressSpace`.
 - `TaskEntry = fn()` is a plain kernel function.
 
 `Task::new(id, entry, rflags)` allocates an 8 KiB stack and calls
@@ -52,7 +54,8 @@ stack.
 initial user `TrapFrame` with ring-3 code/data selectors, a user instruction
 pointer, a user stack pointer, and an initial argument in `rdi`. The scheduler
 restores this frame through `iretq`, so first entry into user mode uses the same
-path as every later interrupt return.
+path as every later interrupt return. User tasks also carry an `AddressSpace`,
+an optional exit code, and optional user-fault metadata.
 
 ## `src/scheduler.rs`
 
@@ -64,12 +67,14 @@ struct Scheduler {
     current: Option<usize>,
     main_context: Context,
     preemption_enabled: bool,
+    current_level_4_frame: Option<u64>,
 }
 ```
 
 `tasks` is the fixed-size early task table, `current` tracks the running task,
 `main_context` stores the boot stack so `scheduler::run()` can return after all
-tasks finish, and `preemption_enabled` gates timer-driven switching.
+tasks finish, `preemption_enabled` gates timer-driven switching, and
+`current_level_4_frame` avoids unnecessary CR3 reloads.
 
 Public scheduler entry points use `interrupts::without_interrupts(...)` around
 critical sections. That is the smallest correct protection for this single-core
@@ -81,11 +86,12 @@ spawn purely cooperative tasks before enabling interrupts, while the preemptive
 test spawns tasks after enabling interrupts so the timer can keep firing after
 the first restore.
 
-`run()` chooses the first ready task, marks it running, saves the boot stack, and
-updates `TSS.rsp0` to that task's kernel-stack top, saves the boot stack, and
-restores the task trap frame. `yield_now()` raises a private software interrupt
-instead of calling a callee-saved-only switch routine; this keeps cooperative
-and preemptive switching on the same full-context path.
+`run()` chooses the first ready task, marks it running, updates `TSS.rsp0` to
+that task's kernel-stack top, switches CR3 if the selected task uses another
+address-space root, saves the boot stack, and restores the task trap frame.
+`yield_now()` raises a private software interrupt instead of calling a
+callee-saved-only switch routine; this keeps cooperative and preemptive
+switching on the same full-context path.
 
 `on_timer_interrupt(frame_rsp)` is called by the timer IRQ stub. It records the
 interrupted task frame, selects the next ready task in round-robin order if
@@ -93,10 +99,11 @@ preemption is enabled, and returns the stack pointer for the frame that assembly
 should resume. `on_yield_interrupt(frame_rsp)` does the same selection without
 checking the preemption gate because an explicit yield is always allowed.
 `on_syscall_yield(frame_rsp)` reuses the same switching path for user
-`int 0x80` yield. `exit_current_from_interrupt(frame_rsp)` and
-`fail_current_from_interrupt(frame_rsp)` mark the current task terminal and
-select another ready task, returning to the boot stack only when no runnable
-task remains.
+`int 0x80` yield. `exit_current_from_interrupt(frame_rsp, exit_code)` and
+`fail_current_with_fault(frame_rsp, fault_info)` mark the current task terminal,
+record user-visible status for tests, and select another ready task. If no
+runnable task remains, the scheduler switches CR3 back to the kernel root before
+returning to the boot stack.
 
 ## `src/arch/x86_64/context.rs`
 
@@ -152,10 +159,10 @@ uses `iretq` to restore the CPU-pushed return state.
 difference is that it calls `yield_interrupt_rust`, so no PIC EOI is involved.
 `syscall_interrupt_entry` also uses this save and restore code for `int 0x80`.
 
-`TrapFrameWithErrorCode` documents the #GP layout. It has the same manually
-saved registers as `TrapFrame`, followed by the CPU-pushed error code and return
-state. The user #GP path never restores that frame; it marks the task failed and
-returns another normal `TrapFrame` instead.
+`TrapFrameWithErrorCode` documents the #GP and #PF layout. It has the same
+manually saved registers as `TrapFrame`, followed by the CPU-pushed error code
+and return state. User #GP/#PF paths never restore that frame; they mark the
+task failed and return another normal `TrapFrame` instead.
 
 `restore_main_context` is separate because the boot stack is not an interrupt
 frame. It restores the small callee-saved frame created by
@@ -173,7 +180,8 @@ The timer scheduling path is:
 6. If preemption is enabled and another task is ready, the scheduler records
    the interrupted task frame and selects the next task.
 7. The timer path sends EOI to the PIC.
-8. Assembly restores the chosen frame and returns through `iretq`.
+8. The scheduler switches CR3 if the selected task uses a different P4 root.
+9. Assembly restores the chosen frame and returns through `iretq`.
 
 This prepares the kernel for later userspace work because the scheduler already
 has a full interrupted-context representation. Later ring-3 work can extend the

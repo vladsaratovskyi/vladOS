@@ -5,9 +5,10 @@ use spin::Mutex;
 use x86_64::instructions::{interrupts as cpu_interrupts, port::Port};
 use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
-use x86_64::PrivilegeLevel;
+use x86_64::{PrivilegeLevel, VirtAddr};
 
 use crate::arch::x86_64::context::{self, TrapFrameWithErrorCode};
+use crate::task::{UserFaultInfo, UserFaultKind};
 use crate::{gdt, hlt_loop, println};
 
 pub const PIC_1_OFFSET: u8 = 32;
@@ -50,9 +51,10 @@ pub fn init_idt() {
     let idt = unsafe { &mut *core::ptr::addr_of_mut!(IDT) };
 
     idt.breakpoint.set_handler_fn(breakpoint_handler);
-    idt.page_fault.set_handler_fn(page_fault_handler);
 
     unsafe {
+        idt.page_fault
+            .set_handler_addr(context::page_fault_entry_addr());
         idt.general_protection_fault
             .set_handler_addr(context::general_protection_entry_addr());
         idt.double_fault
@@ -136,19 +138,22 @@ extern "x86-interrupt" fn double_fault_handler(
     hlt_loop();
 }
 
-extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
+fn fatal_page_fault(
+    accessed_address: VirtAddr,
     error_code: PageFaultErrorCode,
-) {
+    frame: &TrapFrameWithErrorCode,
+) -> ! {
     // CR2 contains the virtual address that the CPU tried to access when it
     // raised this page fault.
-    let accessed_address = Cr2::read();
-
     println!("EXCEPTION: PAGE FAULT");
     println!("Accessed Address: {:?}", accessed_address);
     println!("Error Code: {:?}", error_code);
     print_page_fault_error(error_code);
-    println!("{:#?}", stack_frame);
+    println!("RIP: {:#018x}", frame.rip);
+    println!("CS: {:#06x}", frame.cs);
+    println!("RFLAGS: {:#018x}", frame.rflags);
+    println!("RSP: {:#018x}", frame.rsp);
+    println!("SS: {:#06x}", frame.ss);
 
     // This kernel does not have a frame allocator, demand paging, or recovery
     // policy yet, so returning would just retry the same faulting instruction.
@@ -235,7 +240,14 @@ pub extern "C" fn general_protection_rust(frame_rsp: u64) -> u64 {
     if frame.cs & 0x3 == 0x3 {
         println!("EXCEPTION: USER GENERAL PROTECTION");
         println!("Error code: {}", frame.error_code);
-        return crate::scheduler::fail_current_from_interrupt(frame_rsp);
+        return crate::scheduler::fail_current_with_fault(
+            frame_rsp,
+            UserFaultInfo {
+                kind: UserFaultKind::GeneralProtection,
+                address: None,
+                error_code: frame.error_code,
+            },
+        );
     }
 
     println!("EXCEPTION: GENERAL PROTECTION");
@@ -244,6 +256,29 @@ pub extern "C" fn general_protection_rust(frame_rsp: u64) -> u64 {
     println!("CS: {:#06x}", frame.cs);
 
     hlt_loop();
+}
+
+#[no_mangle]
+pub extern "C" fn page_fault_rust(frame_rsp: u64) -> u64 {
+    let accessed_address = Cr2::read();
+    let frame = unsafe { &*(frame_rsp as *const TrapFrameWithErrorCode) };
+    let error_code = PageFaultErrorCode::from_bits_truncate(frame.error_code);
+
+    if frame.cs & 0x3 == 0x3 {
+        println!("EXCEPTION: USER PAGE FAULT");
+        println!("Accessed Address: {:?}", accessed_address);
+        println!("Error Code: {:?}", error_code);
+        return crate::scheduler::fail_current_with_fault(
+            frame_rsp,
+            UserFaultInfo {
+                kind: UserFaultKind::PageFault,
+                address: Some(accessed_address),
+                error_code: frame.error_code,
+            },
+        );
+    }
+
+    fatal_page_fault(accessed_address, error_code, frame);
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {

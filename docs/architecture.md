@@ -6,9 +6,10 @@ is meant to be read before the line-by-line walkthroughs in
 
 The project is an educational `x86_64` Rust kernel. It is deliberately small:
 there is now a fixed early heap, a legacy PIC/PIT interrupt foundation, a
-stackful task scheduler, and a minimal ring-3 userspace foundation. The current
-userspace step proves privilege transitions and syscalls only; separate address
-spaces, ELF loading, dynamic heap growth, and filesystems are still deferred.
+stackful task scheduler, and a minimal ring-3 userspace foundation with
+per-user-task address spaces. The current userspace step proves memory
+isolation and fault containment, while ELF loading, dynamic heap growth, and
+filesystems are still deferred.
 
 ## What Exists Today
 
@@ -49,6 +50,9 @@ The kernel currently has:
 - software-interrupt syscalls on vector `0x80`
 - user `yield` and `exit` syscalls
 - contained user-mode general-protection faults
+- isolated user address spaces with one page-table root per user task
+- scheduler CR3 switching between kernel and user address spaces
+- contained user-mode page faults
 - one isolated double-fault test kernel
 - one isolated page-fault test kernel
 - one isolated memory-mapping test kernel
@@ -57,6 +61,7 @@ The kernel currently has:
 - one isolated cooperative-task test kernel
 - one isolated preemptive-task test kernel
 - one isolated userspace test kernel
+- one isolated address-space test kernel
 
 For line-by-line details, start with
 [kernel_entry.md](code_walkthrough/kernel_entry.md).
@@ -167,6 +172,7 @@ The project has both `src/lib.rs` and `src/main.rs`.
 - `allocator`
 - `task`
 - `scheduler`
+- `address_space`
 - `syscall`
 - `user`
 - `arch`
@@ -295,7 +301,7 @@ user entry point plus scheduler metadata:
 
 Each task gets an 8 KiB kernel stack. That size is deliberately small because
 the current heap is only 100 KiB and this milestone caps the initial task table
-at four tasks. For user tasks, this stack is also the ring-0 entry stack named
+at eight tasks. For user tasks, this stack is also the ring-0 entry stack named
 by `TSS.rsp0`; the user stack is mapped separately in user-accessible pages.
 
 New task stacks are prepared with an interrupt-return frame that enters a task
@@ -344,12 +350,29 @@ The timer scheduling flow is:
 
 See [tasks.md](code_walkthrough/tasks.md).
 
-## Userspace Foundation
+## Userspace And Address Spaces
 
-The first userspace milestone does not add a process model. User tasks share
-the current page table with the kernel, and the test maps only the tiny user
-code aliases, marker page, and user stacks with `USER_ACCESSIBLE`. This proves
-ring separation before address-space isolation.
+The userspace foundation still does not add a process model, but user tasks no
+longer share the kernel page table. Each user task owns an `AddressSpace`, which
+is a fresh level-4 page-table frame. Kernel tasks continue using the boot/kernel
+address space.
+
+New user address spaces are built by reserving P4 index 1 for user mappings and
+copying the other kernel P4 entries from the boot address space. Copied kernel
+top-level entries have `USER_ACCESSIBLE` cleared, so kernel text/data, heap,
+kernel stacks, device mappings, and the bootloader physical-memory direct map
+remain available to CPL0 but inaccessible to CPL3. User code/data/stack pages
+are mapped under P4 index 1 with `USER_ACCESSIBLE`.
+
+The resulting layout is:
+
+```text
+kernel P4 entries: shared supervisor-only kernel mappings
+user P4 index 1:   per-task user code/data/stack
+
+task A USER_DATA_BASE -> frame A
+task B USER_DATA_BASE -> frame B
+```
 
 User task creation builds an initial `TrapFrame` on the task's kernel stack:
 
@@ -363,29 +386,32 @@ The scheduler restores that frame through the same `iretq` path used by
 preemptive task switching. There is no separate entry mechanism for the first
 CPL3 transition.
 
-Syscalls use `int 0x80` for this milestone. The IDT entry is present at DPL 3,
-so user code may invoke it directly. The low-level syscall stub saves the same
-full trap frame as timer/yield, then Rust dispatch reads the syscall number from
-`rax`:
+Syscalls use `int 0x80`. The IDT entry is present at DPL 3, so user code may
+invoke it directly. The low-level syscall stub saves the same full trap frame as
+timer/yield, then Rust dispatch reads the syscall number from `rax`:
 
 - `0`: yield through the scheduler's existing switch path
-- `1`: mark the current task finished and schedule another task
+- `1`: mark the current task finished, record `rdi` as a minimal exit code, and
+  schedule another task
 
 This is intentionally not `syscall/sysret`; software interrupts reuse the
 kernel's current trap-frame machinery and keep this step focused on safe
 privilege transitions.
 
-A user-mode privileged instruction such as `hlt` raises #GP. The kernel checks
-the saved `cs` privilege bits. If the fault came from CPL3, the current task is
-marked `Failed` and another ready task is resumed. If the same exception came
-from CPL0, the kernel preserves the fatal behavior and halts.
+A user-mode privileged instruction such as `hlt` raises #GP. A user access to
+an unmapped page or a supervisor-only kernel mapping raises #PF. The kernel
+checks the saved `cs` privilege bits. If the fault came from CPL3, the current
+task is marked `Failed`, fault details are recorded, and another ready task is
+resumed. If the same exception came from CPL0, the kernel preserves the fatal
+behavior and halts.
 
 Timer IRQs can also arrive while user code is running. The CPU uses the current
 task's `TSS.rsp0` to enter ring 0, the timer stub saves the interrupted frame,
-and the scheduler may resume a kernel task, another user task, or the same task
-later.
+and the scheduler may load a different CR3 before resuming a kernel task,
+another user task, or the same task later.
 
-See [userspace.md](code_walkthrough/userspace.md).
+See [userspace.md](code_walkthrough/userspace.md) and
+[address_spaces.md](code_walkthrough/address_spaces.md).
 
 ## Page Fault Reporting
 
@@ -404,8 +430,9 @@ The CPU also pushes a page-fault error code. The handler decodes the main bits:
 - reserved page-table bit violation
 - instruction fetch
 
-At this milestone the kernel reports the fault and halts. It does not allocate
-frames, map memory, recover, or retry the instruction.
+Kernel-mode page faults are reported and halt. User-mode page faults are
+contained to the current task and do not allocate frames, demand-map memory, or
+retry the instruction.
 
 See [exceptions.md](code_walkthrough/exceptions.md).
 
@@ -440,6 +467,7 @@ The tests are harness-free bootable kernels:
 - `tests/cooperative_tasks.rs`
 - `tests/preemptive_tasks.rs`
 - `tests/userspace.rs`
+- `tests/address_spaces.rs`
 
 They do not use Rust's normal test harness because this is a `no_std` kernel.
 Instead, each test file defines or generates its own `_start`.
@@ -462,9 +490,12 @@ yield ordering, checks that task-local state survives context switches, and
 exits QEMU after both tasks finish. The preemptive task test enables PIT-driven
 preemption, runs two tasks that do not call `yield_now()` during the proof, and
 exits only after both task-local counters make progress and one task finishes.
-The userspace test maps tiny user code aliases and user stacks, enters CPL3,
-checks `yield` and `exit` syscalls, contains a user-mode privileged-instruction
-fault, and proves a busy user loop can be preempted by the PIT.
+The userspace test creates isolated user tasks, enters CPL3, checks `yield` and
+`exit` syscalls, contains a user-mode privileged-instruction fault, and proves a
+busy user loop can be preempted by the PIT. The address-space test proves that
+two user tasks can reuse the same virtual addresses with independent physical
+memory, that unmapped user pages and kernel-only mappings fault only the
+current task, and that preemption still works across CR3 switches.
 
 See [tests.md](code_walkthrough/tests.md) and
 [build_config.md](code_walkthrough/build_config.md).
@@ -484,6 +515,7 @@ cargo +nightly test --test interrupts
 cargo +nightly test --test cooperative_tasks
 cargo +nightly test --test preemptive_tasks
 cargo +nightly test --test userspace
+cargo +nightly test --test address_spaces
 ```
 
 Use this to boot the normal kernel:
@@ -498,14 +530,15 @@ there.
 ## Current Boundaries
 
 This documentation describes only the current CPU-exception, memory-foundation,
-legacy interrupt-foundation, task, and minimal userspace milestones. The kernel
-still does not have:
+legacy interrupt-foundation, task, and isolated userspace milestones. The
+kernel still does not have:
 
 - heap growth or physical frame reclamation
 - APIC setup
 - kernel stack guard pages
-- separate user address spaces
 - ELF loading
+- demand paging
+- copy-on-write
 - a broad syscall API
 - keyboard decoding or input queues
 

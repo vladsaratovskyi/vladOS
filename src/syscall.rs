@@ -27,7 +27,9 @@ pub fn dispatch(frame_rsp: u64) -> u64 {
             frame.rax = 0;
             crate::scheduler::on_syscall_yield(frame_rsp)
         }
-        Some(SyscallNumber::Exit) => crate::scheduler::exit_current_from_interrupt(frame_rsp),
+        Some(SyscallNumber::Exit) => {
+            crate::scheduler::exit_current_from_interrupt(frame_rsp, frame.rdi)
+        }
         None => {
             frame.rax = u64::MAX;
             frame_rsp

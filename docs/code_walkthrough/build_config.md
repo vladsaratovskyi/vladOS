@@ -59,6 +59,8 @@ binary target, integration test kernels, and panic strategy.
 | `harness = false` | Makes the preemptive task test a bootable kernel that exits QEMU after PIT-driven switching checks. |
 | `[[test]] name = "userspace"` | Declares the minimal userspace integration test target. |
 | `harness = false` | Makes the userspace test a bootable kernel that exits QEMU after ring-3 entry, syscall, user-fault, and user-preemption checks. |
+| `[[test]] name = "address_spaces"` | Declares the isolated user address-space integration test target. |
+| `harness = false` | Makes the address-space test a bootable kernel that exits QEMU after CR3 switching, user isolation, and user page-fault checks. |
 | `[profile.dev] panic = "abort"` | Development builds abort on panic. There is no stack unwinding runtime. |
 | `[profile.release] panic = "abort"` | Release builds also abort on panic. |
 

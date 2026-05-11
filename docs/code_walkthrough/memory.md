@@ -16,6 +16,8 @@ inspect and edit the active page-table hierarchy:
 - use the bootloader-provided physical-memory offset mapping
 - create an `OffsetPageTable`
 - allocate unused 4 KiB physical frames from the bootloader memory map
+- retain the direct-map offset and remaining frame allocator for later user
+  address-space construction
 
 Heap setup stays in [allocator.md](allocator.md) so page/frame mapping and heap
 policy remain separate.
@@ -37,10 +39,16 @@ policy remain separate.
 | Code | Explanation |
 | --- | --- |
 | `use bootloader::bootinfo::{MemoryMap, MemoryRegionType};` | Imports the bootloader memory-map type and the region classification enum. |
+| `use spin::Mutex;` | Provides a small no-std lock for the global memory state used by address-space creation. |
 | `use x86_64::{ ... };` | Imports the control-register, paging, physical-address, and virtual-address types needed to work with page tables. |
+| `static MEMORY_STATE: Mutex<Option<MemoryState>>` | Stores the bootloader direct-map offset, kernel P4 frame, and remaining frame allocator after heap setup. |
+| `struct MemoryState` | Groups the memory values needed to build page tables that are not currently loaded in CR3. |
 | `pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static>` | Builds a mapper for the current page-table hierarchy. It is unsafe because the caller must pass the correct bootloader offset. |
 | `let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };` | Finds the active L4 page table by reading `CR3` and translating the table's physical address through the direct physical-memory mapping. |
 | `OffsetPageTable::new(level_4_table, physical_memory_offset)` | Creates an `x86_64` mapper that can walk and edit page tables through the offset mapping. |
+| `pub fn init_global(...)` | Records the direct-map offset, current kernel P4 frame, and remaining boot-info frame allocator for user address-space creation. |
+| `pub fn kernel_level_4_frame()` | Returns the recorded kernel P4 frame, or the current CR3 frame before global memory state exists. |
+| `with_state(...)` | Runs a closure with mutable access to the stored memory state. This keeps unsafe page-table construction centralized. |
 | `unsafe fn active_level_4_table(...) -> &'static mut PageTable` | Returns a mutable reference to the active level-4 table. This is unsafe because aliasing or using the wrong table would break memory safety. |
 | `let (level_4_table_frame, _) = Cr3::read();` | Reads the physical frame address of the active level-4 page table from `CR3`. |
 | `let phys = level_4_table_frame.start_address();` | Gets the physical start address of that frame. |
@@ -60,3 +68,5 @@ policy remain separate.
 | `let frame = self.usable_frames().nth(self.next);` | Recreates the usable-frame iterator and selects the next not-yet-returned frame. This is simple, not efficient. |
 | `self.next += 1;` | Advances the monotonic allocation counter. |
 | `frame` | Returns `Some(frame)` while usable frames remain, or `None` when memory is exhausted. |
+| `MemoryState::page_table_mut(frame)` | Converts a physical page-table frame into a mutable virtual reference through the bootloader direct map. |
+| `MemoryState::frame_slice_mut(frame)` | Converts a physical data frame into a temporary direct-map byte slice so user code/data pages can be initialized before mapping. |
