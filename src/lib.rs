@@ -7,6 +7,7 @@ extern crate alloc;
 pub mod address_space;
 pub mod allocator;
 pub mod arch;
+pub mod elf;
 pub mod gdt;
 pub mod interrupts;
 pub mod memory;

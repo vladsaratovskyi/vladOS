@@ -7,6 +7,7 @@ use x86_64::registers::rflags;
 use x86_64::VirtAddr;
 
 use crate::arch::x86_64::context::{self, Context};
+use crate::elf::ElfLoadError;
 use crate::gdt;
 use crate::task::{Task, TaskEntry, TaskId, TaskState, UserFaultInfo, MAX_TASKS};
 use crate::user::UserTaskInit;
@@ -17,6 +18,7 @@ static mut SCHEDULER: Scheduler = Scheduler::new();
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnError {
     Full,
+    ElfLoad(ElfLoadError),
 }
 
 struct Scheduler {
@@ -237,6 +239,19 @@ pub fn spawn_user(init: UserTaskInit) -> Result<TaskId, SpawnError> {
     cpu_interrupts::without_interrupts(|| unsafe {
         scheduler_mut().spawn_user(init, initial_rflags)
     })
+}
+
+pub fn spawn_user_elf(_name: &'static str, elf_bytes: &'static [u8]) -> Result<TaskId, SpawnError> {
+    spawn_user_elf_with_arg(_name, elf_bytes, 0)
+}
+
+pub fn spawn_user_elf_with_arg(
+    _name: &'static str,
+    elf_bytes: &'static [u8],
+    arg0: u64,
+) -> Result<TaskId, SpawnError> {
+    let init = crate::elf::load_user_elf(elf_bytes, arg0).map_err(SpawnError::ElfLoad)?;
+    spawn_user(init)
 }
 
 pub fn run() {

@@ -12,8 +12,9 @@ The first userspace milestone entered CPL3 but still used the kernel's active
 page table. This milestone gives every user task a separate P4 root, switches
 CR3 in the scheduler, and treats user page faults as task-local failures.
 
-There is still no ELF loader, demand paging, copy-on-write, `fork`, or process
-object. User programs are tiny built-in byte images copied into eager mappings.
+The next layer can now load embedded ELF binaries into these address spaces,
+but there is still no demand paging, copy-on-write, `fork`, filesystem-backed
+`execve`, or process object.
 
 ## Layout
 
@@ -29,6 +30,8 @@ Every user address space uses the same user virtual addresses:
 ```text
 USER_CODE_BASE       executable user code page
 USER_DATA_BASE       private writable user data page
+USER_ELF_LOAD_START  first virtual address accepted for ELF PT_LOAD segments
+USER_ELF_LOAD_END    exclusive end of the ELF load range
 USER_TEST_PAGE_BASE  optional private test page
 USER_STACK_TOP       top of the private 8 KiB user stack
 ```
@@ -84,6 +87,12 @@ created user-accessible. Kernel P4 entries stay supervisor-only.
 `AddressSpace::read_user_u64(...)` is a test helper. It walks the target P4 via
 the physical-memory direct map and reads the physical frame without switching
 CR3.
+
+`AddressSpace::map_user_region(...)`, `copy_to_user(...)`, and
+`zero_user_range(...)` are loader helpers. They let the ELF loader allocate
+eager user pages, copy file-backed segment bytes, and zero BSS ranges without
+temporarily switching CR3. Copies use the kernel direct map, so the loader can
+initialize read-only user pages before user mode ever runs.
 
 ## CR3 Switching
 

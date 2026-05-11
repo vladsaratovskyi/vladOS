@@ -16,8 +16,9 @@ This milestone proves that the kernel can enter CPL3, receive a controlled
 return to CPL0 through a software interrupt, terminate user tasks, and contain a
 user-mode privileged-instruction fault. User tasks now run in isolated address
 spaces; this file focuses on the user entry and syscall layer. It deliberately
-does not add ELF loading, `syscall/sysret`, a process model, or a broad POSIX
-API.
+keeps the syscall ABI small. ELF loading is covered separately in
+[elf_loader.md](elf_loader.md); there is still no `syscall/sysret`, process
+model, or broad POSIX API.
 
 ## Core Model
 
@@ -63,8 +64,10 @@ complete `UserTaskInit`:
 | Code | Explanation |
 | --- | --- |
 | `USER_CODE_BASE`, `USER_DATA_BASE`, `USER_TEST_PAGE_BASE`, `USER_STACK_TOP` | Fixed user virtual layout inside the reserved user P4 slot. These addresses are reused in every user address space. |
+| `USER_ELF_LOAD_START` and `USER_ELF_LOAD_END` | Bounds used by the ELF loader for eager `PT_LOAD` segment mappings. |
 | `create_user_task(...)` | Allocates a fresh `AddressSpace`, copies one tiny user program into a user code page, maps a private data page, and maps a private 8 KiB user stack. |
 | `create_user_task_with_test_page(...)` | Same setup, plus an optional private test page used by address-space isolation tests. |
+| `map_user_stack(...)` | Shared helper used by both built-in user snippets and ELF-backed user tasks. |
 | `userspace_yield_exit_entry` | Writes a marker, executes `int 0x80` yield, writes a second marker, then executes `int 0x80` exit. |
 | `userspace_privileged_hlt_entry` | Writes a marker and executes `hlt`, which should raise a user-mode #GP. |
 | `userspace_busy_counter_entry` | Increments a marker forever; the userspace test only regains control if timer preemption from CPL3 works. |

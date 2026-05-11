@@ -7,9 +7,9 @@ is meant to be read before the line-by-line walkthroughs in
 The project is an educational `x86_64` Rust kernel. It is deliberately small:
 there is now a fixed early heap, a legacy PIC/PIT interrupt foundation, a
 stackful task scheduler, and a minimal ring-3 userspace foundation with
-per-user-task address spaces. The current userspace step proves memory
-isolation and fault containment, while ELF loading, dynamic heap growth, and
-filesystems are still deferred.
+per-user-task address spaces. The current userspace step can load tiny embedded
+ELF64 executables into isolated address spaces. Dynamic heap growth, demand
+paging, dynamic linking, and filesystems are still deferred.
 
 ## What Exists Today
 
@@ -53,6 +53,8 @@ The kernel currently has:
 - isolated user address spaces with one page-table root per user task
 - scheduler CR3 switching between kernel and user address spaces
 - contained user-mode page faults
+- a strict embedded ELF64 loader for static user executables
+- process-style user spawning from ELF entry points
 - one isolated double-fault test kernel
 - one isolated page-fault test kernel
 - one isolated memory-mapping test kernel
@@ -62,6 +64,7 @@ The kernel currently has:
 - one isolated preemptive-task test kernel
 - one isolated userspace test kernel
 - one isolated address-space test kernel
+- one isolated ELF-loader test kernel
 
 For line-by-line details, start with
 [kernel_entry.md](code_walkthrough/kernel_entry.md).
@@ -173,6 +176,7 @@ The project has both `src/lib.rs` and `src/main.rs`.
 - `task`
 - `scheduler`
 - `address_space`
+- `elf`
 - `syscall`
 - `user`
 - `arch`
@@ -413,6 +417,48 @@ another user task, or the same task later.
 See [userspace.md](code_walkthrough/userspace.md) and
 [address_spaces.md](code_walkthrough/address_spaces.md).
 
+## Embedded ELF Loader
+
+The current loader is an in-kernel loader for embedded test binaries, not a
+filesystem-backed `execve`. Test fixtures are generated at build time as small
+ELF64 byte arrays and embedded with `include_bytes!`. The kernel parses those
+bytes directly.
+
+The supported ELF subset is intentionally narrow:
+
+- ELF64
+- little-endian
+- `ET_EXEC`
+- `EM_X86_64`
+- current ELF version
+- `PT_LOAD` program headers only
+
+The loader rejects malformed or unsupported files instead of guessing. It
+checks header bounds, segment sizes, page alignment, overlapping mappings,
+load-range limits, and whether the entry point lies inside an executable load
+segment.
+
+For each `PT_LOAD` segment, the loader creates mappings in a fresh
+`AddressSpace`, copies the file-backed bytes through the kernel direct map, and
+zeros the remaining `p_memsz - p_filesz` range. Segment `PF_W` controls whether
+the leaf PTE is writable. Execute/read permissions are tracked by loader
+validation; this kernel has not enabled NX yet, so non-executable mappings are
+documented but not enforced in hardware at this milestone.
+
+After loading segments, the loader maps the existing 8 KiB user stack and
+returns a `UserTaskInit` with:
+
+- `rip = e_entry`
+- `rsp = USER_STACK_TOP`
+- the task's fresh address-space root
+- the initial `rdi` argument used by tests
+
+`scheduler::spawn_user_elf` registers that task with the existing scheduler, so
+syscalls, user page-fault containment, and timer preemption all use the same
+trap-frame and CR3-switching paths as earlier user tasks.
+
+See [elf_loader.md](code_walkthrough/elf_loader.md).
+
 ## Page Fault Reporting
 
 When the CPU raises a page fault, it stores the faulting virtual address in
@@ -468,6 +514,7 @@ The tests are harness-free bootable kernels:
 - `tests/preemptive_tasks.rs`
 - `tests/userspace.rs`
 - `tests/address_spaces.rs`
+- `tests/elf_loader.rs`
 
 They do not use Rust's normal test harness because this is a `no_std` kernel.
 Instead, each test file defines or generates its own `_start`.
@@ -495,7 +542,10 @@ The userspace test creates isolated user tasks, enters CPL3, checks `yield` and
 busy user loop can be preempted by the PIT. The address-space test proves that
 two user tasks can reuse the same virtual addresses with independent physical
 memory, that unmapped user pages and kernel-only mappings fault only the
-current task, and that preemption still works across CR3 switches.
+current task, and that preemption still works across CR3 switches. The
+ELF-loader test spawns embedded ELF user programs, checks exit codes and private
+data mappings, rejects bad ELF headers, contains a read-only segment write
+fault, and proves PIT preemption still crosses ELF-backed CR3 roots.
 
 See [tests.md](code_walkthrough/tests.md) and
 [build_config.md](code_walkthrough/build_config.md).
@@ -516,6 +566,7 @@ cargo +nightly test --test cooperative_tasks
 cargo +nightly test --test preemptive_tasks
 cargo +nightly test --test userspace
 cargo +nightly test --test address_spaces
+cargo +nightly test --test elf_loader
 ```
 
 Use this to boot the normal kernel:
@@ -536,8 +587,9 @@ kernel still does not have:
 - heap growth or physical frame reclamation
 - APIC setup
 - kernel stack guard pages
-- ELF loading
 - demand paging
+- dynamic linking
+- filesystem-backed `execve`
 - copy-on-write
 - a broad syscall API
 - keyboard decoding or input queues

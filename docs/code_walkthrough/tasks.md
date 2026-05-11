@@ -86,6 +86,13 @@ spawn purely cooperative tasks before enabling interrupts, while the preemptive
 test spawns tasks after enabling interrupts so the timer can keep firing after
 the first restore.
 
+`spawn_user(init)` keeps the older explicit user-task path used by the
+userspace tests. `spawn_user_elf(name, elf_bytes)` and
+`spawn_user_elf_with_arg(name, elf_bytes, arg0)` call the ELF loader first, then
+register the returned `UserTaskInit` through the same user-task insertion path.
+The scheduler does not know whether a user task came from a built-in byte image
+or an ELF file after the task has been created.
+
 `run()` chooses the first ready task, marks it running, updates `TSS.rsp0` to
 that task's kernel-stack top, switches CR3 if the selected task uses another
 address-space root, saves the boot stack, and restores the task trap frame.

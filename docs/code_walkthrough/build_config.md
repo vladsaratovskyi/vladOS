@@ -6,6 +6,7 @@ Back to the [architecture guide](../architecture.md) or the
 This page covers:
 
 - `Cargo.toml`
+- `build.rs`
 - `.cargo/config.toml`
 - `x86_64-vlad_os.json`
 - `rust-toolchain.toml`
@@ -61,8 +62,34 @@ binary target, integration test kernels, and panic strategy.
 | `harness = false` | Makes the userspace test a bootable kernel that exits QEMU after ring-3 entry, syscall, user-fault, and user-preemption checks. |
 | `[[test]] name = "address_spaces"` | Declares the isolated user address-space integration test target. |
 | `harness = false` | Makes the address-space test a bootable kernel that exits QEMU after CR3 switching, user isolation, and user page-fault checks. |
+| `[[test]] name = "elf_loader"` | Declares the embedded ELF-loader integration test target. |
+| `harness = false` | Makes the ELF-loader test a bootable kernel that exits QEMU after validating embedded ELF loading and rejection paths. |
 | `[profile.dev] panic = "abort"` | Development builds abort on panic. There is no stack unwinding runtime. |
 | `[profile.release] panic = "abort"` | Release builds also abort on panic. |
+
+## `build.rs`
+
+### Purpose
+
+`build.rs` generates tiny ELF64 user-program fixtures into Cargo's `OUT_DIR`.
+The kernel tests embed those files with `include_bytes!`, so this milestone gets
+real ELF byte streams without adding an external assembler, linker, filesystem,
+or user-program Cargo workspace.
+
+### Line-By-Line
+
+| Code | Explanation |
+| --- | --- |
+| `const USER_BASE`, `USER_CODE_BASE`, and `USER_DATA_BASE` | Mirror the fixed user virtual layout used by the kernel loader. The generated ELFs use the same addresses that the loader will later validate. |
+| `const ET_EXEC`, `EM_X86_64`, `PT_LOAD`, and `PF_*` | Name the ELF constants needed to write minimal executable headers and loadable segment headers. |
+| `struct Segment` | Describes one generated `PT_LOAD` segment: virtual address, permissions, memory size, and file-backed bytes. |
+| `main()` | Writes all generated fixtures into `OUT_DIR`. Cargo reruns the build script automatically when it changes. |
+| `exit_42()` | Builds a program that executes `exit(42)` through `int 0x80`. |
+| `write_private_data()` | Builds a program that stores its initial `rdi` argument at `USER_DATA_BASE`, reads it back, and exits with that value. |
+| `write_readonly_segment()` | Builds a program that writes to a read-only load segment, which should produce a contained user page fault. |
+| `busy_counter()` | Builds a program that increments a private data word forever so timer preemption can be proven. |
+| `elf(entry, segments)` | Writes an ELF64 header, one program header per segment, and page-aligned segment file bytes. |
+| instruction helpers such as `mov_rdi_imm64` | Emit the few x86_64 instruction encodings needed by the tiny user fixtures. |
 
 ## `.cargo/config.toml`
 

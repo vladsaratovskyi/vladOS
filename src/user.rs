@@ -3,7 +3,7 @@ use core::arch::{asm, global_asm};
 use x86_64::structures::paging::{PageSize, PageTableFlags, Size4KiB};
 use x86_64::VirtAddr;
 
-use crate::address_space::{AddressSpace, AddressSpaceError, USER_P4_INDEX};
+use crate::address_space::{AddressSpace, AddressSpaceError, UserMapFlags, USER_P4_INDEX};
 use crate::task::TASK_STACK_SIZE;
 
 const PAGE_SIZE: u64 = Size4KiB::SIZE;
@@ -14,6 +14,8 @@ pub const USER_DATA_BASE: u64 = USER_BASE + 0x0060_0000;
 pub const USER_TEST_PAGE_BASE: u64 = USER_BASE + 0x0070_0000;
 pub const USER_STACK_TOP: u64 = USER_BASE + 0x0080_0000;
 pub const USER_STACK_PAGES: usize = TASK_STACK_SIZE / 4096;
+pub const USER_ELF_LOAD_START: u64 = USER_CODE_BASE;
+pub const USER_ELF_LOAD_END: u64 = USER_TEST_PAGE_BASE;
 
 pub const USER_MARKER_RAN: usize = 0;
 pub const USER_MARKER_AFTER_YIELD: usize = 1;
@@ -164,13 +166,7 @@ pub fn create_user_task_with_test_page(
         address_space.write_frame_u64(test_frame, value);
     }
 
-    let stack_bottom = USER_STACK_TOP - USER_STACK_PAGES as u64 * PAGE_SIZE;
-    for page_index in 0..USER_STACK_PAGES {
-        address_space.map_zeroed_user_page(
-            VirtAddr::new(stack_bottom + page_index as u64 * PAGE_SIZE),
-            user_data_flags(),
-        )?;
-    }
+    map_user_stack(&mut address_space)?;
 
     Ok(UserTaskInit {
         address_space,
@@ -203,6 +199,15 @@ pub unsafe fn syscall_exit() -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+pub fn map_user_stack(address_space: &mut AddressSpace) -> Result<(), AddressSpaceError> {
+    let stack_bottom = USER_STACK_TOP - USER_STACK_PAGES as u64 * PAGE_SIZE;
+    address_space.map_user_region(
+        VirtAddr::new(stack_bottom),
+        USER_STACK_PAGES * PAGE_SIZE as usize,
+        UserMapFlags::read_write(),
+    )
 }
 
 fn map_program(

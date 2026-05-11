@@ -7,12 +7,55 @@ use x86_64::{PhysAddr, VirtAddr};
 use crate::memory;
 
 pub const USER_P4_INDEX: usize = 1;
+const PAGE_SIZE: u64 = 4096;
 
 #[derive(Debug)]
 pub enum AddressSpaceError {
     FrameAllocationFailed,
     KernelUserSlotInUse,
+    RangeOverflow,
     MapTo(MapToError<Size4KiB>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserCopyError {
+    RangeOverflow,
+    NotMapped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserMapFlags {
+    pub readable: bool,
+    pub writable: bool,
+    pub executable: bool,
+}
+
+impl UserMapFlags {
+    pub const fn new(readable: bool, writable: bool, executable: bool) -> Self {
+        Self {
+            readable,
+            writable,
+            executable,
+        }
+    }
+
+    pub const fn read_execute() -> Self {
+        Self::new(true, false, true)
+    }
+
+    pub const fn read_write() -> Self {
+        Self::new(true, true, false)
+    }
+
+    fn page_table_flags(self) -> PageTableFlags {
+        let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+
+        if self.writable {
+            flags |= PageTableFlags::WRITABLE;
+        }
+
+        flags
+    }
 }
 
 #[derive(Debug)]
@@ -96,6 +139,37 @@ impl AddressSpace {
         Ok(frame)
     }
 
+    pub fn map_user_region(
+        &mut self,
+        virt_start: VirtAddr,
+        size: usize,
+        flags: UserMapFlags,
+    ) -> Result<(), AddressSpaceError> {
+        if size == 0 {
+            return Ok(());
+        }
+
+        let start = align_down(virt_start.as_u64(), PAGE_SIZE);
+        let end = align_up(
+            virt_start
+                .as_u64()
+                .checked_add(size as u64)
+                .ok_or(AddressSpaceError::RangeOverflow)?,
+            PAGE_SIZE,
+        )
+        .ok_or(AddressSpaceError::RangeOverflow)?;
+
+        let mut address = start;
+        while address < end {
+            self.map_zeroed_user_page(VirtAddr::new(address), flags.page_table_flags())?;
+            address = address
+                .checked_add(PAGE_SIZE)
+                .ok_or(AddressSpaceError::RangeOverflow)?;
+        }
+
+        Ok(())
+    }
+
     pub fn map_frame(
         &mut self,
         address: VirtAddr,
@@ -118,6 +192,58 @@ impl AddressSpace {
 
             Ok(())
         })
+    }
+
+    pub fn copy_to_user(&mut self, dst: VirtAddr, src: &[u8]) -> Result<(), UserCopyError> {
+        let mut copied = 0;
+
+        while copied < src.len() {
+            let dst_addr = dst
+                .as_u64()
+                .checked_add(copied as u64)
+                .ok_or(UserCopyError::RangeOverflow)?;
+            let phys = self
+                .translate_user(VirtAddr::new(dst_addr))
+                .ok_or(UserCopyError::NotMapped)?;
+            let page_offset = (phys.as_u64() & (PAGE_SIZE - 1)) as usize;
+            let count = core::cmp::min(src.len() - copied, PAGE_SIZE as usize - page_offset);
+
+            memory::with_state(|state| unsafe {
+                let dst_ptr: *mut u8 =
+                    (state.physical_memory_offset() + phys.as_u64()).as_mut_ptr();
+                core::ptr::copy_nonoverlapping(src[copied..].as_ptr(), dst_ptr, count);
+            });
+
+            copied += count;
+        }
+
+        Ok(())
+    }
+
+    pub fn zero_user_range(&mut self, dst: VirtAddr, len: usize) -> Result<(), UserCopyError> {
+        let mut zeroed = 0;
+
+        while zeroed < len {
+            let dst_addr = dst
+                .as_u64()
+                .checked_add(zeroed as u64)
+                .ok_or(UserCopyError::RangeOverflow)?;
+            let phys = self
+                .translate_user(VirtAddr::new(dst_addr))
+                .ok_or(UserCopyError::NotMapped)?;
+            let page_offset = (phys.as_u64() & (PAGE_SIZE - 1)) as usize;
+            let count = core::cmp::min(len - zeroed, PAGE_SIZE as usize - page_offset);
+
+            memory::with_state(|state| unsafe {
+                let dst_ptr: *mut u8 =
+                    (state.physical_memory_offset() + phys.as_u64()).as_mut_ptr();
+                core::ptr::write_bytes(dst_ptr, 0, count);
+            });
+
+            zeroed += count;
+        }
+
+        Ok(())
     }
 
     pub fn write_frame_bytes(
@@ -198,4 +324,12 @@ impl AddressSpace {
 
 fn entry_allows_user(flags: PageTableFlags) -> bool {
     flags.contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
+}
+
+fn align_down(value: u64, align: u64) -> u64 {
+    value & !(align - 1)
+}
+
+fn align_up(value: u64, align: u64) -> Option<u64> {
+    Some(value.checked_add(align - 1)? & !(align - 1))
 }

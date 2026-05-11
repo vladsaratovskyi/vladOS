@@ -60,6 +60,10 @@ harness = false
 name = "address_spaces"
 harness = false
 
+[[test]]
+name = "elf_loader"
+harness = false
+
 [profile.dev]
 panic = "abort"
 

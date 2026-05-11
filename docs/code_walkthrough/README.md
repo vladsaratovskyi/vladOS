@@ -19,14 +19,17 @@ Read order:
    address-space state in `src/memory.rs`
 8. [userspace.md](userspace.md): `src/user.rs`, `src/syscall.rs`, and the
    ring-3 pieces of `src/gdt.rs`, `src/interrupts.rs`, and the scheduler
-9. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
+9. [elf_loader.md](elf_loader.md): `src/elf.rs`, generated embedded ELF
+   fixtures, and `tests/elf_loader.rs`
+10. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
    `src/serial.rs`, and `src/qemu.rs`
-10. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
+11. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
    `tests/memory_mapping.rs`, `tests/heap_allocation.rs`, and
    `tests/interrupts.rs`, `tests/cooperative_tasks.rs`, and
    `tests/preemptive_tasks.rs`, `tests/userspace.rs`, and
-   `tests/address_spaces.rs`
-11. [build_config.md](build_config.md): `Cargo.toml`, `.cargo/config.toml`,
+   `tests/address_spaces.rs`, and `tests/elf_loader.rs`
+12. [build_config.md](build_config.md): `Cargo.toml`, `build.rs`,
+   `.cargo/config.toml`,
    `x86_64-vlad_os.json`, and `rust-toolchain.toml`
 
 ## How To Read The Tables

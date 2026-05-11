@@ -18,9 +18,9 @@ kernel initializes CPU tables, prints memory diagnostics, initializes the fixed
 heap, enables the legacy timer and keyboard interrupt path, triggers a
 breakpoint proof, runs a short cooperative task demo, and halts. Preemptive
 task switching is available for tests and later demos, but normal boot does not
-enable it yet. The minimal userspace and address-space isolation paths are
-exercised by `tests/userspace.rs` and `tests/address_spaces.rs` instead of the
-normal boot demo.
+enable it yet. The minimal userspace, address-space isolation, and embedded ELF
+loader paths are exercised by `tests/userspace.rs`, `tests/address_spaces.rs`,
+and `tests/elf_loader.rs` instead of the normal boot demo.
 
 ### Dependencies
 
@@ -120,9 +120,10 @@ and provides the allocation error handler shared by all bootable kernels.
 | `#![feature(abi_x86_interrupt)]` | Enables the nightly interrupt ABI used by exception handlers and tests. |
 | `#![feature(alloc_error_handler)]` | Enables the no-std allocation failure hook required by the `alloc` crate. |
 | `extern crate alloc;` | Makes Rust's heap-allocated collection crate available without enabling `std`. |
-| `pub mod arch;` | Exposes architecture-specific code, currently the x86_64 context switch. |
 | `pub mod address_space;` | Exposes isolated user page-table roots and eager user-page mapping helpers. |
 | `pub mod allocator;` | Exposes fixed heap mapping and global allocator setup. |
+| `pub mod arch;` | Exposes architecture-specific code, currently the x86_64 context switch. |
+| `pub mod elf;` | Exposes the strict embedded ELF64 loader used by process-style user task spawning. |
 | `pub mod gdt;` | Exposes GDT/TSS setup. |
 | `pub mod interrupts;` | Exposes the production IDT setup, exception handlers, PIC/PIT initialization, IRQ indexes, and timer tick counter. |
 | `pub mod memory;` | Exposes active page-table access and the boot-info frame allocator. |

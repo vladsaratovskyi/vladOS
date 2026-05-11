@@ -48,6 +48,8 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - isolated user address spaces with one page-table root per user task
 - CR3 switching in the scheduler
 - user-mode page-fault containment
+- strict in-kernel ELF64 loader for embedded static user binaries
+- process-style `spawn_user_elf` path that starts at the ELF entry point
 - one-page virtual mapping proof in an isolated QEMU integration test
 - isolated QEMU integration test for the double-fault path
 - isolated QEMU integration test for the page-fault path
@@ -61,7 +63,10 @@ See [GENERAL_PLAN.md](GENERAL_PLAN.md) for the long-term roadmap and study plan.
 - isolated QEMU integration test for same-virtual-address user isolation,
   user page-fault containment, kernel mapping protection, and preemption across
   CR3 switches
-- no APIC, ELF loading, heap growth, or filesystem
+- isolated QEMU integration test for embedded ELF loading, bad ELF rejection,
+  per-process data isolation, read-only segment faults, and preemption across
+  ELF-backed address spaces
+- no APIC, demand paging, dynamic linking, heap growth, or filesystem
 
 Documentation entry points:
 
@@ -186,6 +191,12 @@ Run the isolated address-space QEMU test:
 cargo +nightly test --test address_spaces
 ```
 
+Run the isolated ELF-loader QEMU test:
+
+```powershell
+cargo +nightly test --test elf_loader
+```
+
 Expected serial output:
 
 ```text
@@ -198,6 +209,7 @@ cooperative_tasks::round_robin_yield... [ok]
 preemptive_tasks::timer_preemption...    [ok]
 userspace::ring3_syscalls_and_faults...  [ok]
 address_spaces::isolation_and_faults...  [ok]
+elf_loader::embedded_user_elfs...        [ok]
 ```
 
 The normal kernel boot does not intentionally double fault or page fault. These
@@ -221,6 +233,7 @@ cargo +nightly test --test cooperative_tasks
 cargo +nightly test --test preemptive_tasks
 cargo +nightly test --test userspace
 cargo +nightly test --test address_spaces
+cargo +nightly test --test elf_loader
 ```
 
 `cargo +nightly run` boots the normal kernel in QEMU. It does not exit on its
