@@ -49,8 +49,11 @@ The high-level flow is:
 5. File-backed bytes are copied through the kernel's direct physical-memory map.
 6. The BSS tail, if any, is zeroed.
 7. The existing private user stack is mapped.
-8. The loader returns `UserTaskInit` with `entry_point = e_entry`.
-9. The scheduler builds the normal user trap frame and later resumes it through
+8. The loader computes the initial heap start from the highest loaded segment
+   end, rounded up to a page.
+9. The loader returns `UserTaskInit` with `entry_point = e_entry` and heap
+   metadata.
+10. The scheduler builds the normal user trap frame and later resumes it through
    `iretq`.
 
 The first user instruction therefore runs at the ELF entry point, but no new
@@ -104,6 +107,7 @@ The generated programs use the current syscall ABI:
 | `rax = 5` | syscall `open` |
 | `rax = 6` | syscall `read` |
 | `rax = 7` | syscall `close` |
+| `rax = 8` | syscall `brk` |
 | `rdi` | exit code for `exit`, or initial test argument before the program changes it |
 | `int 0x80` | enter the kernel syscall path |
 
@@ -122,6 +126,8 @@ Fixtures include:
 - file-descriptor fixtures: exercise embedded-file `open`, `read`, fd-routed
   `write`, `close`, bad arguments, fd reuse, independent offsets, and
   descriptor cleanup on process exit.
+- user-heap fixtures: exercise `brk` query, growth, shrink, zeroing,
+  heap-backed `write`, private heaps, and preemption after heap growth.
 
 ## `tests/elf_loader.rs`
 

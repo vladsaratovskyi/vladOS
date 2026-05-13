@@ -70,6 +70,8 @@ binary target, integration test kernels, and panic strategy.
 | `harness = false` | Makes the process-lifecycle test a bootable kernel that exits QEMU after process wait/reap checks. |
 | `[[test]] name = "file_descriptors"` | Declares the descriptor-table and embedded-file I/O integration test target. |
 | `harness = false` | Makes the file-descriptor test a bootable kernel that exits QEMU after open/read/write/close checks. |
+| `[[test]] name = "user_heap"` | Declares the per-process user heap and `brk` integration test target. |
+| `harness = false` | Makes the user-heap test a bootable kernel that exits QEMU after heap growth, shrink, and isolation checks. |
 | `[profile.dev] panic = "abort"` | Development builds abort on panic. There is no stack unwinding runtime. |
 | `[profile.release] panic = "abort"` | Release builds also abort on panic. |
 
@@ -99,6 +101,7 @@ or user-program Cargo workspace.
 | `read_data_exit()` | Builds a program that exits with the qword at `USER_DATA_BASE`, used to prove kernel-to-user copy into writable memory. |
 | process lifecycle fixtures | Build small programs for `getpid`, delayed child exit, immediate child exit, a contained child fault, and a parent suite that checks `waitpid` behavior. |
 | file descriptor fixtures | Build small programs that exercise `open`, `read`, `write`, `close`, fd reuse, read EOF, bad pointers, bad flags, independent offsets, and process-exit descriptor cleanup. |
+| user heap fixtures | Build small programs that exercise `brk` query, growth, shrink, zeroing, heap-backed `write`, invalid break requests, private heaps, and preemption after heap growth. |
 | `elf(entry, segments)` | Writes an ELF64 header, one program header per segment, and page-aligned segment file bytes. |
 | instruction helpers such as `mov_rdi_imm64` | Emit the few x86_64 instruction encodings needed by the tiny user fixtures. |
 

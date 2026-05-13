@@ -40,6 +40,7 @@ model yet.
 - `Running` or `Zombie` state
 - `ProcessExit::Exited(code)` or `ProcessExit::Faulted`
 - process-owned `AddressSpace`
+- process-owned `UserHeap`
 - process-owned file descriptor table
 - main `TaskId`
 

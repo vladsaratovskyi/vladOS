@@ -34,6 +34,7 @@ USER_CODE_BASE       executable user code page
 USER_DATA_BASE       private writable user data page
 USER_ELF_LOAD_START  first virtual address accepted for ELF PT_LOAD segments
 USER_ELF_LOAD_END    exclusive end of the ELF load range
+USER_HEAP_LIMIT      exclusive end of the brk heap range
 USER_TEST_PAGE_BASE  optional private test page
 USER_STACK_TOP       top of the private 8 KiB user stack
 ```
@@ -100,6 +101,11 @@ read-only user pages without taking a kernel page fault.
 eager user pages, copy file-backed segment bytes, and zero BSS ranges without
 temporarily switching CR3. Copies use the kernel direct map, so the loader can
 initialize read-only user pages before user mode ever runs.
+
+`map_user_heap_pages(...)` and `unmap_user_heap_pages(...)` are the focused
+helpers used by `brk`. Growth maps zeroed writable user pages. Shrink unmaps
+whole pages and flushes those TLB entries, but the early frame allocator does
+not yet reuse the physical frames.
 
 ## CR3 Switching
 

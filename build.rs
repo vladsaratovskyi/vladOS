@@ -22,9 +22,11 @@ const SYS_WAITPID: u32 = 4;
 const SYS_OPEN: u32 = 5;
 const SYS_READ: u32 = 6;
 const SYS_CLOSE: u32 = 7;
+const SYS_BRK: u32 = 8;
 const ENOENT: u64 = (-2_i64) as u64;
 const EBADF: u64 = (-9_i64) as u64;
 const ECHILD: u64 = (-10_i64) as u64;
+const ENOMEM: u64 = (-12_i64) as u64;
 const EFAULT: u64 = (-14_i64) as u64;
 const EINVAL: u64 = (-22_i64) as u64;
 const WNOHANG: u64 = 1;
@@ -45,6 +47,10 @@ const FD_TEMP_FD_A: u64 = USER_DATA_BASE + 48;
 const FD_TEMP_FD_B: u64 = USER_DATA_BASE + 56;
 const FD_BUFFER: u64 = USER_DATA_BASE + 128;
 const FD_CROSS_BUFFER: u64 = USER_DATA_BASE + PAGE_SIZE - 4;
+
+const HEAP_SCRATCH_BREAK: u64 = USER_DATA_BASE;
+const HEAP_SCRATCH_ARG: u64 = USER_DATA_BASE + 8;
+const HEAP_MESSAGE: &[u8] = b"hello from brk heap\n";
 
 const PROCESS_PID_DELAYED: u64 = USER_DATA_BASE;
 const PROCESS_PID_IMMEDIATE: u64 = USER_DATA_BASE + 8;
@@ -86,6 +92,16 @@ fn main() {
     write_fixture(out_dir, "fd_syscall_suite.elf", fd_syscall_suite());
     write_fixture(out_dir, "fd_first_open_exit.elf", fd_first_open_exit());
     write_fixture(out_dir, "fd_open_leak_exit.elf", fd_open_leak_exit());
+    write_fixture(
+        out_dir,
+        "brk_query_invalid_suite.elf",
+        brk_query_invalid_suite(),
+    );
+    write_fixture(out_dir, "brk_growth_suite.elf", brk_growth_suite());
+    write_fixture(out_dir, "brk_shrink_fault.elf", brk_shrink_fault());
+    write_fixture(out_dir, "brk_shrink_continue.elf", brk_shrink_continue());
+    write_fixture(out_dir, "brk_private_writer.elf", brk_private_writer());
+    write_fixture(out_dir, "brk_busy_counter.elf", brk_busy_counter());
 
     let mut bad_machine = exit_42();
     bad_machine[18..20].copy_from_slice(&3_u16.to_le_bytes());
@@ -584,6 +600,163 @@ fn fd_elf(code: Vec<u8>) -> Vec<u8> {
     )
 }
 
+fn brk_query_invalid_suite() -> Vec<u8> {
+    let mut code = Vec::new();
+
+    brk_query(&mut code);
+    check_rax_nonzero_continue(&mut code);
+    store_rax(&mut code, HEAP_SCRATCH_BREAK);
+
+    brk_from_rax_delta(&mut code, -1);
+    check_rax_eq_continue(&mut code, EINVAL);
+    brk_query(&mut code);
+    check_rax_eq_mem_continue(&mut code, HEAP_SCRATCH_BREAK);
+
+    brk_syscall_imm(&mut code, USER_TEST_PAGE_BASE + PAGE_SIZE);
+    check_rax_eq_continue(&mut code, ENOMEM);
+    brk_query(&mut code);
+    check_rax_eq_mem_continue(&mut code, HEAP_SCRATCH_BREAK);
+
+    exit_with_code(&mut code, 0);
+
+    heap_elf(code)
+}
+
+fn brk_growth_suite() -> Vec<u8> {
+    let mut code = Vec::new();
+
+    brk_query(&mut code);
+    store_rax(&mut code, HEAP_SCRATCH_BREAK);
+    brk_from_rax_delta(&mut code, PAGE_SIZE as i32);
+    check_rax_eq_mem_plus_continue(&mut code, HEAP_SCRATCH_BREAK, PAGE_SIZE as i32);
+    check_byte_ptr_mem_eq_continue(&mut code, HEAP_SCRATCH_BREAK, 0, 0);
+    check_byte_ptr_mem_eq_continue(&mut code, HEAP_SCRATCH_BREAK, 128, 0);
+    check_byte_ptr_mem_eq_continue(&mut code, HEAP_SCRATCH_BREAK, PAGE_SIZE as i32 - 1, 0);
+
+    write_byte_ptr_mem(&mut code, HEAP_SCRATCH_BREAK, 0, 0x5a);
+    check_byte_ptr_mem_eq_continue(&mut code, HEAP_SCRATCH_BREAK, 0, 0x5a);
+
+    brk_query(&mut code);
+    brk_from_rax_delta(&mut code, (2 * PAGE_SIZE) as i32);
+    check_rax_eq_mem_plus_continue(&mut code, HEAP_SCRATCH_BREAK, (3 * PAGE_SIZE) as i32);
+
+    write_byte_ptr_mem(&mut code, HEAP_SCRATCH_BREAK, PAGE_SIZE as i32 - 1, 0xa1);
+    write_byte_ptr_mem(&mut code, HEAP_SCRATCH_BREAK, PAGE_SIZE as i32, 0xb2);
+    write_byte_ptr_mem(&mut code, HEAP_SCRATCH_BREAK, (2 * PAGE_SIZE) as i32, 0xc3);
+    check_byte_ptr_mem_eq_continue(&mut code, HEAP_SCRATCH_BREAK, PAGE_SIZE as i32 - 1, 0xa1);
+    check_byte_ptr_mem_eq_continue(&mut code, HEAP_SCRATCH_BREAK, PAGE_SIZE as i32, 0xb2);
+    check_byte_ptr_mem_eq_continue(&mut code, HEAP_SCRATCH_BREAK, (2 * PAGE_SIZE) as i32, 0xc3);
+
+    write_bytes_ptr_mem(&mut code, HEAP_SCRATCH_BREAK, 64, HEAP_MESSAGE);
+    write_syscall_fd_ptr_mem(
+        &mut code,
+        1,
+        HEAP_SCRATCH_BREAK,
+        64,
+        HEAP_MESSAGE.len() as u64,
+    );
+    check_rax_eq_continue(&mut code, HEAP_MESSAGE.len() as u64);
+
+    brk_query(&mut code);
+    brk_from_rax_delta(&mut code, 1);
+    check_rax_eq_mem_plus_continue(&mut code, HEAP_SCRATCH_BREAK, (3 * PAGE_SIZE) as i32 + 1);
+
+    exit_with_code(&mut code, 0);
+
+    heap_elf(code)
+}
+
+fn brk_shrink_fault() -> Vec<u8> {
+    let mut code = Vec::new();
+
+    brk_query(&mut code);
+    store_rax(&mut code, HEAP_SCRATCH_BREAK);
+    brk_from_rax_delta(&mut code, (2 * PAGE_SIZE) as i32);
+    check_rax_eq_mem_plus_continue(&mut code, HEAP_SCRATCH_BREAK, (2 * PAGE_SIZE) as i32);
+
+    brk_from_mem_delta(&mut code, HEAP_SCRATCH_BREAK, PAGE_SIZE as i32);
+    check_rax_eq_mem_plus_continue(&mut code, HEAP_SCRATCH_BREAK, PAGE_SIZE as i32);
+
+    load_rbx_from_mem_plus(&mut code, HEAP_SCRATCH_BREAK, PAGE_SIZE as i32);
+    code.extend_from_slice(&[0x48, 0x8b, 0x03]); // mov rax, [rbx]
+    exit_with_code(&mut code, 99);
+
+    heap_elf(code)
+}
+
+fn brk_shrink_continue() -> Vec<u8> {
+    let mut code = Vec::new();
+
+    brk_query(&mut code);
+    store_rax(&mut code, HEAP_SCRATCH_BREAK);
+    brk_from_rax_delta(&mut code, (2 * PAGE_SIZE) as i32);
+    check_rax_eq_mem_plus_continue(&mut code, HEAP_SCRATCH_BREAK, (2 * PAGE_SIZE) as i32);
+
+    write_byte_ptr_mem(&mut code, HEAP_SCRATCH_BREAK, 0, 0x77);
+    write_byte_ptr_mem(&mut code, HEAP_SCRATCH_BREAK, PAGE_SIZE as i32, 0x66);
+
+    brk_from_mem_delta(&mut code, HEAP_SCRATCH_BREAK, 1);
+    check_rax_eq_mem_plus_continue(&mut code, HEAP_SCRATCH_BREAK, 1);
+    check_byte_ptr_mem_eq_continue(&mut code, HEAP_SCRATCH_BREAK, 0, 0x77);
+
+    exit_with_code(&mut code, 0);
+
+    heap_elf(code)
+}
+
+fn brk_private_writer() -> Vec<u8> {
+    let mut code = Vec::new();
+
+    store_rdi(&mut code, HEAP_SCRATCH_ARG);
+    brk_query(&mut code);
+    store_rax(&mut code, HEAP_SCRATCH_BREAK);
+    brk_from_rax_delta(&mut code, PAGE_SIZE as i32);
+    check_rax_eq_mem_plus_continue(&mut code, HEAP_SCRATCH_BREAK, PAGE_SIZE as i32);
+
+    mov_rbx_imm64(&mut code, HEAP_SCRATCH_ARG);
+    code.extend_from_slice(&[0x48, 0x8b, 0x3b]); // mov rdi, [rbx]
+    load_rbx_from_mem_plus(&mut code, HEAP_SCRATCH_BREAK, 0);
+    code.extend_from_slice(&[0x48, 0x89, 0x3b]); // mov [rbx], rdi
+
+    exit_with_code(&mut code, 0);
+
+    heap_elf(code)
+}
+
+fn brk_busy_counter() -> Vec<u8> {
+    let mut code = Vec::new();
+
+    brk_query(&mut code);
+    store_rax(&mut code, HEAP_SCRATCH_BREAK);
+    brk_from_rax_delta(&mut code, PAGE_SIZE as i32);
+    check_rax_eq_mem_plus_continue(&mut code, HEAP_SCRATCH_BREAK, PAGE_SIZE as i32);
+    load_rbx_from_mem_plus(&mut code, HEAP_SCRATCH_BREAK, 0);
+    code.extend_from_slice(&[0x48, 0xff, 0x03]); // inc qword [rbx]
+    code.extend_from_slice(&[0xeb, 0xfb]); // jmp back to inc
+
+    heap_elf(code)
+}
+
+fn heap_elf(code: Vec<u8>) -> Vec<u8> {
+    elf(
+        USER_CODE_BASE,
+        &[
+            Segment {
+                vaddr: USER_CODE_BASE,
+                flags: PF_R | PF_X,
+                memsz: code.len() as u64,
+                data: code,
+            },
+            Segment {
+                vaddr: USER_DATA_BASE,
+                flags: PF_R | PF_W,
+                memsz: PAGE_SIZE,
+                data: vec![0; PAGE_SIZE as usize],
+            },
+        ],
+    )
+}
+
 fn elf(entry: u64, segments: &[Segment]) -> Vec<u8> {
     let header_size = 64_usize;
     let program_header_size = 56_usize;
@@ -722,6 +895,65 @@ fn close_syscall_fd_mem(bytes: &mut Vec<u8>, fd_addr: u64) {
     int_0x80(bytes);
 }
 
+fn brk_query(bytes: &mut Vec<u8>) {
+    brk_syscall_imm(bytes, 0);
+}
+
+fn brk_syscall_imm(bytes: &mut Vec<u8>, requested: u64) {
+    mov_rax_imm32(bytes, SYS_BRK);
+    mov_rdi_imm64(bytes, requested);
+    int_0x80(bytes);
+}
+
+fn brk_from_rax_delta(bytes: &mut Vec<u8>, delta: i32) {
+    bytes.extend_from_slice(&[0x48, 0x89, 0xc7]); // mov rdi, rax
+    add_rdi_i32(bytes, delta);
+    mov_rax_imm32(bytes, SYS_BRK);
+    int_0x80(bytes);
+}
+
+fn brk_from_mem_delta(bytes: &mut Vec<u8>, address: u64, delta: i32) {
+    mov_rbx_imm64(bytes, address);
+    bytes.extend_from_slice(&[0x48, 0x8b, 0x3b]); // mov rdi, [rbx]
+    add_rdi_i32(bytes, delta);
+    mov_rax_imm32(bytes, SYS_BRK);
+    int_0x80(bytes);
+}
+
+fn write_syscall_fd_ptr_mem(bytes: &mut Vec<u8>, fd: u64, ptr_addr: u64, offset: i32, len: u64) {
+    mov_rax_imm32(bytes, SYS_WRITE);
+    mov_rdi_imm64(bytes, fd);
+    mov_rbx_imm64(bytes, ptr_addr);
+    bytes.extend_from_slice(&[0x48, 0x8b, 0x33]); // mov rsi, [rbx]
+    add_rsi_i32(bytes, offset);
+    mov_rdx_imm64(bytes, len);
+    int_0x80(bytes);
+}
+
+fn load_rbx_from_mem_plus(bytes: &mut Vec<u8>, address: u64, offset: i32) {
+    mov_rbx_imm64(bytes, address);
+    bytes.extend_from_slice(&[0x48, 0x8b, 0x1b]); // mov rbx, [rbx]
+    add_rbx_i32(bytes, offset);
+}
+
+fn write_byte_ptr_mem(bytes: &mut Vec<u8>, ptr_addr: u64, offset: i32, value: u8) {
+    load_rbx_from_mem_plus(bytes, ptr_addr, offset);
+    bytes.extend_from_slice(&[0xc6, 0x03, value]); // mov byte [rbx], imm8
+}
+
+fn write_bytes_ptr_mem(bytes: &mut Vec<u8>, ptr_addr: u64, offset: i32, values: &[u8]) {
+    for (index, value) in values.iter().enumerate() {
+        write_byte_ptr_mem(bytes, ptr_addr, offset + index as i32, *value);
+    }
+}
+
+fn check_byte_ptr_mem_eq_continue(bytes: &mut Vec<u8>, ptr_addr: u64, offset: i32, expected: u8) {
+    load_rbx_from_mem_plus(bytes, ptr_addr, offset);
+    bytes.extend_from_slice(&[0x80, 0x3b, expected]); // cmp byte [rbx], imm8
+    bytes.extend_from_slice(&[0x74, 21]); // je over the failure exit sequence
+    exit_with_code(bytes, 1);
+}
+
 fn yield_syscall(bytes: &mut Vec<u8>) {
     mov_rax_imm32(bytes, SYS_YIELD);
     int_0x80(bytes);
@@ -746,6 +978,15 @@ fn check_rax_eq_continue(bytes: &mut Vec<u8>, expected: u64) {
 fn check_rax_eq_mem_continue(bytes: &mut Vec<u8>, address: u64) {
     mov_rbx_imm64(bytes, address);
     bytes.extend_from_slice(&[0x48, 0x3b, 0x03]); // cmp rax, [rbx]
+    bytes.extend_from_slice(&[0x74, 21]); // je over the failure exit sequence
+    exit_with_code(bytes, 1);
+}
+
+fn check_rax_eq_mem_plus_continue(bytes: &mut Vec<u8>, address: u64, delta: i32) {
+    mov_rbx_imm64(bytes, address);
+    bytes.extend_from_slice(&[0x48, 0x8b, 0x0b]); // mov rcx, [rbx]
+    add_rcx_i32(bytes, delta);
+    bytes.extend_from_slice(&[0x48, 0x39, 0xc8]); // cmp rax, rcx
     bytes.extend_from_slice(&[0x74, 21]); // je over the failure exit sequence
     exit_with_code(bytes, 1);
 }
@@ -778,6 +1019,31 @@ fn check_byte_mem_eq_continue(bytes: &mut Vec<u8>, address: u64, expected: u8) {
 fn store_rax(bytes: &mut Vec<u8>, address: u64) {
     mov_rbx_imm64(bytes, address);
     bytes.extend_from_slice(&[0x48, 0x89, 0x03]); // mov [rbx], rax
+}
+
+fn store_rdi(bytes: &mut Vec<u8>, address: u64) {
+    mov_rbx_imm64(bytes, address);
+    bytes.extend_from_slice(&[0x48, 0x89, 0x3b]); // mov [rbx], rdi
+}
+
+fn add_rbx_i32(bytes: &mut Vec<u8>, value: i32) {
+    bytes.extend_from_slice(&[0x48, 0x81, 0xc3]);
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn add_rcx_i32(bytes: &mut Vec<u8>, value: i32) {
+    bytes.extend_from_slice(&[0x48, 0x81, 0xc1]);
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn add_rdi_i32(bytes: &mut Vec<u8>, value: i32) {
+    bytes.extend_from_slice(&[0x48, 0x81, 0xc7]);
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn add_rsi_i32(bytes: &mut Vec<u8>, value: i32) {
+    bytes.extend_from_slice(&[0x48, 0x81, 0xc6]);
+    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 fn exit_with_code(bytes: &mut Vec<u8>, code: u64) {

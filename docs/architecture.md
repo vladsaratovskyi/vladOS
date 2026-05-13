@@ -10,9 +10,9 @@ stackful task scheduler, and a minimal ring-3 userspace foundation with
 per-process address spaces. The current userspace step can load tiny embedded
 ELF64 executables into isolated address spaces, safely copy user buffers for
 byte-oriented syscalls, track single-threaded user processes through exit and
-`waitpid`, and read tiny embedded files through per-process file descriptors.
-Dynamic heap growth, demand paging, dynamic linking, VFS work, and filesystems
-are still deferred.
+`waitpid`, grow per-process user heaps with a project-local `brk`, and read
+tiny embedded files through per-process file descriptors. Kernel heap growth,
+demand paging, dynamic linking, VFS work, and filesystems are still deferred.
 
 ## What Exists Today
 
@@ -52,11 +52,12 @@ The kernel currently has:
 - minimal user tasks entered through `iretq`
 - software-interrupt syscalls on vector `0x80`
 - user `yield`, `exit`, `write`, `getpid`, `waitpid`, `open`, `read`, and
-  `close` syscalls
+  `close`, and `brk` syscalls
 - checked user-memory range validation and page-by-page copying
 - a small process table above the task scheduler
 - process IDs, parent/child metadata, zombie state, `getpid`, and exact-child
   `waitpid`
+- per-process user heap metadata and eager `brk` growth
 - per-process descriptor tables and a kernel-wide open-file table
 - read-only embedded files exposed through `open` and `read`
 - contained user-mode general-protection faults
@@ -80,6 +81,7 @@ The kernel currently has:
 - one isolated user-syscall and checked user-memory test kernel
 - one isolated process-lifecycle test kernel
 - one isolated file-descriptor and embedded file I/O test kernel
+- one isolated user-heap and `brk` test kernel
 
 For line-by-line details, start with
 [kernel_entry.md](code_walkthrough/kernel_entry.md).
@@ -385,6 +387,7 @@ longer-lived user resources and lifecycle metadata:
 - `Running` or `Zombie` state
 - process exit reason
 - the process address space
+- the process user heap state
 - the process file descriptor table
 - the process main task
 
@@ -438,6 +441,7 @@ timer/yield, then Rust dispatch reads the syscall number from `rax`:
 - `5`: open one exact embedded-file path read-only
 - `6`: read bytes from a descriptor into checked user memory
 - `7`: close a descriptor
+- `8`: query or update the current process's program break
 
 This is intentionally not `syscall/sysret`; software interrupts reuse the
 kernel's current trap-frame machinery and keep this step focused on safe
@@ -478,6 +482,44 @@ another user task, or the same task later.
 See [userspace.md](code_walkthrough/userspace.md),
 [address_spaces.md](code_walkthrough/address_spaces.md), and
 [process_lifecycle.md](code_walkthrough/process_lifecycle.md).
+
+## User Heap And `brk`
+
+Every user process now owns a small heap policy object:
+
+- `start`: first valid break value
+- `brk`: current byte-granular program break
+- `mapped_end`: page-aligned end of mapped heap pages
+- `limit`: exclusive maximum break
+
+For ELF-backed processes, the loader computes `start` from the highest loaded
+`PT_LOAD` segment end, rounded up to a 4 KiB page. The heap limit is
+`USER_TEST_PAGE_BASE`, leaving the existing test page and user stack outside
+the heap range. Built-in user snippets use the page after `USER_DATA_BASE` as
+their heap start for compatibility with older tests.
+
+The current user layout is:
+
+```text
+USER_CODE_BASE..USER_ELF_LOAD_END   ELF load segments
+heap start..USER_TEST_PAGE_BASE     per-process brk heap
+USER_TEST_PAGE_BASE                 reserved test page
+USER_STACK_TOP - 8 KiB..top         per-process user stack
+```
+
+`brk(0)` returns the current break. `brk(new_break)` grows or shrinks the
+logical break. Growth eagerly maps writable user pages and zeros each new page
+before returning to userspace. Shrink unmaps whole pages above the new break
+when the break crosses a page boundary. The break itself is byte-granular, but
+protection remains page-granular; bytes above `brk` inside a still-mapped page
+are not independently protected.
+
+Unmapped heap pages are removed from the virtual address space, but the early
+frame allocator still cannot reuse physical frames. Full frame reclamation,
+userspace `malloc`, `sbrk`, `mmap`, demand paging, and resource limits remain
+deferred.
+
+See [user_heap_and_brk.md](code_walkthrough/user_heap_and_brk.md).
 
 ## File Descriptors And Embedded Files
 
@@ -656,6 +698,7 @@ The tests are harness-free bootable kernels:
 - `tests/user_syscalls.rs`
 - `tests/process_lifecycle.rs`
 - `tests/file_descriptors.rs`
+- `tests/user_heap.rs`
 
 They do not use Rust's normal test harness because this is a `no_std` kernel.
 Instead, each test file defines or generates its own `_start`.
@@ -695,7 +738,10 @@ blocking and nonblocking `waitpid`, zombie persistence before reap, bad status
 pointers, child fault status, and continued scheduling after child exit. The
 file-descriptor test checks stdio setup, embedded-file open/read/write/close
 paths, fd reuse, independent open offsets, process-exit descriptor cleanup, and
-continued preemption across file syscalls.
+continued preemption across file syscalls. The user-heap test checks initial
+heap metadata, `brk` query/growth/shrink, zeroed private heap pages,
+heap-backed `write`, invalid break requests, shrink faults, and preemption
+after heap growth.
 
 See [tests.md](code_walkthrough/tests.md) and
 [build_config.md](code_walkthrough/build_config.md).
@@ -720,6 +766,7 @@ cargo +nightly test --test elf_loader
 cargo +nightly test --test user_syscalls
 cargo +nightly test --test process_lifecycle
 cargo +nightly test --test file_descriptors
+cargo +nightly test --test user_heap
 ```
 
 Use this to boot the normal kernel:
@@ -737,10 +784,11 @@ This documentation describes only the current CPU-exception, memory-foundation,
 legacy interrupt-foundation, task, and isolated userspace milestones. The
 kernel still does not have:
 
-- heap growth or physical frame reclamation
+- kernel heap growth or physical frame reclamation
 - APIC setup
 - kernel stack guard pages
 - demand paging
+- userspace malloc, `sbrk`, `mmap`, and overcommit
 - dynamic linking
 - filesystem-backed `execve`
 - copy-on-write

@@ -4,6 +4,7 @@ use x86_64::VirtAddr;
 pub const SYSCALL_VECTOR: u8 = 0x80;
 pub const ENOENT: isize = 2;
 pub const EBADF: isize = 9;
+pub const ENOMEM: isize = 12;
 pub const EFAULT: isize = 14;
 pub const EINVAL: isize = 22;
 pub const ENFILE: isize = 23;
@@ -27,12 +28,14 @@ pub enum SyscallNumber {
     Open = 5,
     Read = 6,
     Close = 7,
+    Brk = 8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SysError {
     NoEntry,
     BadFd,
+    NoMemory,
     Fault,
     Invalid,
     SystemFileLimit,
@@ -47,6 +50,7 @@ impl SysError {
         match self {
             Self::NoEntry => ENOENT,
             Self::BadFd => EBADF,
+            Self::NoMemory => ENOMEM,
             Self::Fault => EFAULT,
             Self::Invalid => EINVAL,
             Self::SystemFileLimit => ENFILE,
@@ -73,6 +77,7 @@ impl SyscallNumber {
             value if value == Self::Open as u64 => Some(Self::Open),
             value if value == Self::Read as u64 => Some(Self::Read),
             value if value == Self::Close as u64 => Some(Self::Close),
+            value if value == Self::Brk as u64 => Some(Self::Brk),
             _ => None,
         }
     }
@@ -134,6 +139,12 @@ pub fn dispatch(frame_rsp: u64) -> u64 {
         }
         Some(SyscallNumber::Close) => {
             frame.rax = crate::scheduler::sys_close(frame.rdi as usize)
+                .map(|value| value as u64)
+                .unwrap_or_else(SysError::raw_return);
+            frame_rsp
+        }
+        Some(SyscallNumber::Brk) => {
+            frame.rax = crate::scheduler::sys_brk(frame.rdi)
                 .map(|value| value as u64)
                 .unwrap_or_else(SysError::raw_return);
             frame_rsp

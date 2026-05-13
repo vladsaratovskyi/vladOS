@@ -18,6 +18,7 @@ This page covers:
 - `tests/user_syscalls.rs`
 - `tests/process_lifecycle.rs`
 - `tests/file_descriptors.rs`
+- `tests/user_heap.rs`
 
 These tests are full bootable kernels. They do not use Rust's normal test
 harness. Each file defines or generates its own `_start`, installs only the
@@ -542,3 +543,37 @@ descriptors.
 | `process_exit_closes_descriptors()` | Uses a fixture that leaks an fd intentionally; the kernel still releases it when the process exits. |
 | `preemption_still_works_across_file_syscalls()` | Runs a busy user process beside the fd suite with preemption enabled, proving timer switching and CR3 reloads still work during file syscalls. |
 | `serial::output_contains(...)` | Uses the deterministic serial mirror to assert that embedded file bytes were actually written through fd-backed stdout. |
+
+## `tests/user_heap.rs`
+
+### Purpose
+
+This test proves per-process user heap growth through the project-local `brk`
+syscall. It checks heap metadata, eager page mapping, zero-before-exposure,
+whole-page shrink unmapping, heap privacy, and timer preemption after heap
+growth.
+
+### Invariants
+
+- Initial `brk` and `mapped_end` equal the page-aligned heap start.
+- Growth maps writable user pages and does not expose stale physical bytes.
+- Invalid requests return errors without moving the break.
+- Shrink can only enforce faults at page granularity.
+- Identical heap virtual addresses in different processes map to private
+  physical memory.
+
+### Line-By-Line
+
+| Code | Explanation |
+| --- | --- |
+| `BRK_QUERY_INVALID_SUITE_ELF` | User fixture that checks `brk(0)`, below-start rejection, above-limit rejection, and unchanged break after failures. |
+| `BRK_GROWTH_SUITE_ELF` | Grows the heap across several pages, checks zeroed bytes, writes markers, passes a heap buffer to `write`, and performs an unaligned grow. |
+| `BRK_SHRINK_FAULT_ELF` | Grows by two pages, shrinks to one page, then directly accesses the removed page and should fault. |
+| `BRK_SHRINK_CONTINUE_ELF` | Shrinks across a page boundary but continues using the still-mapped lower heap page. |
+| `BRK_PRIVATE_WRITER_ELF` | Writes its startup argument to the first heap qword; two instances prove process-private heap mappings. |
+| `BRK_BUSY_COUNTER_ELF` | Grows one heap page, then increments it forever so PIT preemption can be proven. |
+| `heap_metadata_and_invalid_requests()` | Verifies kernel-side heap start, break, mapped end, limit, and invalid request behavior. |
+| `growth_zeroing_and_write()` | Verifies eager mapping, zeroing, heap-backed `write`, and final mapped end after an unaligned grow. |
+| `shrink_unmaps_whole_pages()` | Verifies the removed page faults and is no longer translated in the process address space. |
+| `same_virtual_heap_address_is_private_per_process()` | Verifies two processes use the same heap virtual address but retain different values. |
+| `preemption_still_works_across_brk()` | Gives a heap-backed busy loop the CPU and resumes only after a timer interrupt. |

@@ -29,16 +29,18 @@ Read order:
 12. [file_descriptors_and_basic_io.md](file_descriptors_and_basic_io.md):
    `src/fd.rs`, `src/file.rs`, descriptor syscalls, and
    `tests/file_descriptors.rs`
-13. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
+13. [user_heap_and_brk.md](user_heap_and_brk.md): per-process user heap
+   metadata, `SYS_BRK`, heap page mapping, and `tests/user_heap.rs`
+14. [output_and_qemu.md](output_and_qemu.md): `src/vga_buffer.rs`,
    `src/serial.rs`, and `src/qemu.rs`
-14. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
+15. [tests.md](tests.md): `tests/stack_overflow.rs`, `tests/page_fault.rs`,
    `tests/memory_mapping.rs`, `tests/heap_allocation.rs`, and
    `tests/interrupts.rs`, `tests/cooperative_tasks.rs`, and
    `tests/preemptive_tasks.rs`, `tests/userspace.rs`, and
    `tests/address_spaces.rs`, `tests/elf_loader.rs`, and
    `tests/user_syscalls.rs`, `tests/process_lifecycle.rs`, and
-   `tests/file_descriptors.rs`
-15. [build_config.md](build_config.md): `Cargo.toml`, `build.rs`,
+   `tests/file_descriptors.rs`, and `tests/user_heap.rs`
+16. [build_config.md](build_config.md): `Cargo.toml`, `build.rs`,
    `.cargo/config.toml`,
    `x86_64-vlad_os.json`, and `rust-toolchain.toml`
 

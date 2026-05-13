@@ -4,6 +4,7 @@ use x86_64::structures::paging::{PageSize, PageTableFlags, Size4KiB};
 use x86_64::VirtAddr;
 
 use crate::address_space::{AddressSpace, AddressSpaceError, UserMapFlags, USER_P4_INDEX};
+use crate::process::{UserHeap, UserHeapError};
 use crate::task::TASK_STACK_SIZE;
 
 const PAGE_SIZE: u64 = Size4KiB::SIZE;
@@ -16,6 +17,7 @@ pub const USER_STACK_TOP: u64 = USER_BASE + 0x0080_0000;
 pub const USER_STACK_PAGES: usize = TASK_STACK_SIZE / 4096;
 pub const USER_ELF_LOAD_START: u64 = USER_CODE_BASE;
 pub const USER_ELF_LOAD_END: u64 = USER_TEST_PAGE_BASE;
+pub const USER_HEAP_LIMIT: u64 = USER_TEST_PAGE_BASE;
 
 pub const USER_MARKER_RAN: usize = 0;
 pub const USER_MARKER_AFTER_YIELD: usize = 1;
@@ -27,6 +29,7 @@ pub struct UserTaskInit {
     pub address_space: AddressSpace,
     pub entry_point: VirtAddr,
     pub user_stack_top: VirtAddr,
+    pub heap: UserHeap,
     pub arg0: u64,
 }
 
@@ -167,11 +170,13 @@ pub fn create_user_task_with_test_page(
     }
 
     map_user_stack(&mut address_space)?;
+    let heap = default_builtin_heap().map_err(|_| AddressSpaceError::RangeOverflow)?;
 
     Ok(UserTaskInit {
         address_space,
         entry_point,
         user_stack_top: VirtAddr::new(USER_STACK_TOP),
+        heap,
         arg0,
     })
 }
@@ -225,6 +230,26 @@ fn map_program(
 
 fn user_data_flags() -> PageTableFlags {
     PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE
+}
+
+pub fn heap_for_loaded_image(max_segment_end: u64) -> Result<UserHeap, UserHeapError> {
+    let heap_start = align_up(max_segment_end, PAGE_SIZE).ok_or(UserHeapError::InvalidRange)?;
+    if heap_start < USER_ELF_LOAD_START || heap_start > USER_HEAP_LIMIT {
+        return Err(UserHeapError::InvalidRange);
+    }
+
+    UserHeap::new(VirtAddr::new(heap_start), VirtAddr::new(USER_HEAP_LIMIT))
+}
+
+fn default_builtin_heap() -> Result<UserHeap, UserHeapError> {
+    UserHeap::new(
+        VirtAddr::new(USER_DATA_BASE + PAGE_SIZE),
+        VirtAddr::new(USER_HEAP_LIMIT),
+    )
+}
+
+fn align_up(value: u64, align: u64) -> Option<u64> {
+    Some(value.checked_add(align - 1)? & !(align - 1))
 }
 
 impl UserProgram {

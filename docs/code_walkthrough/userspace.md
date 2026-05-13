@@ -90,6 +90,7 @@ See [address_spaces.md](address_spaces.md) for page-table construction.
 - `5`: `Open`
 - `6`: `Read`
 - `7`: `Close`
+- `8`: `Brk`
 
 The calling convention is intentionally small: syscall number in `rax`, return
 value in `rax`, and `exit` uses `rdi` as a minimal process exit code for
@@ -100,7 +101,8 @@ for an optional wait-status pointer, and `rdx` for options. `open` uses
 fd/buffer/length register pattern as `write`, with the buffer used as the
 destination. `close` uses `rdi` for the descriptor number. The current user code
 uses inline/global assembly `int 0x80` wrappers rather than calling kernel
-scheduler functions directly.
+scheduler functions directly. `brk` uses `rdi` for the requested break, with
+`0` meaning "query current break".
 
 The flow is:
 
@@ -122,7 +124,9 @@ The flow is:
     parent task until a specific child exits.
 12. `Open`, `Read`, and `Close` dispatch through the minimal embedded-file and
     descriptor layer.
-13. Assembly restores the selected trap frame and finishes with `iretq`.
+13. `Brk` updates the owning process's heap state and user page mappings, or
+    returns a negative error without changing the break.
+14. Assembly restores the selected trap frame and finishes with `iretq`.
 
 This uses software interrupts instead of `syscall/sysret` because the kernel
 already has a full trap-frame interrupt path. It keeps this step about safe
@@ -131,7 +135,8 @@ privilege transitions rather than fast syscall entry.
 See [user_memory_and_write.md](user_memory_and_write.md) for the checked
 user-buffer boundary and
 [file_descriptors_and_basic_io.md](file_descriptors_and_basic_io.md) for
-descriptor dispatch.
+descriptor dispatch, and [user_heap_and_brk.md](user_heap_and_brk.md) for heap
+growth.
 
 ## User Fault Flow
 

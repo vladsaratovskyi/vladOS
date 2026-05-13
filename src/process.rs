@@ -65,9 +65,59 @@ pub struct Process {
     children: Vec<ProcessId>,
     state: ProcessState,
     address_space: AddressSpace,
+    heap: UserHeap,
     fd_table: FdTable,
     main_task: TaskId,
     orphaned: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserHeap {
+    start: VirtAddr,
+    brk: VirtAddr,
+    limit: VirtAddr,
+    mapped_end: VirtAddr,
+}
+
+impl UserHeap {
+    pub fn new(start: VirtAddr, limit: VirtAddr) -> Result<Self, UserHeapError> {
+        if start.as_u64() >= limit.as_u64() || !is_page_aligned(start) || !is_page_aligned(limit) {
+            return Err(UserHeapError::InvalidRange);
+        }
+
+        Ok(Self {
+            start,
+            brk: start,
+            limit,
+            mapped_end: start,
+        })
+    }
+
+    pub fn start(&self) -> VirtAddr {
+        self.start
+    }
+
+    pub fn brk(&self) -> VirtAddr {
+        self.brk
+    }
+
+    pub fn limit(&self) -> VirtAddr {
+        self.limit
+    }
+
+    pub fn mapped_end(&self) -> VirtAddr {
+        self.mapped_end
+    }
+
+    pub fn set_break(&mut self, brk: VirtAddr, mapped_end: VirtAddr) {
+        self.brk = brk;
+        self.mapped_end = mapped_end;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserHeapError {
+    InvalidRange,
 }
 
 impl Process {
@@ -85,6 +135,18 @@ impl Process {
 
     pub fn address_space(&self) -> &AddressSpace {
         &self.address_space
+    }
+
+    pub fn address_space_mut(&mut self) -> &mut AddressSpace {
+        &mut self.address_space
+    }
+
+    pub fn heap(&self) -> UserHeap {
+        self.heap
+    }
+
+    pub fn heap_mut(&mut self) -> &mut UserHeap {
+        &mut self.heap
     }
 
     pub fn fd_table(&self) -> &FdTable {
@@ -135,6 +197,7 @@ impl ProcessTable {
         &mut self,
         parent: Option<ProcessId>,
         address_space: AddressSpace,
+        heap: UserHeap,
         fd_table: FdTable,
         main_task: TaskId,
     ) -> Result<ProcessId, ProcessError> {
@@ -150,6 +213,7 @@ impl ProcessTable {
             children: Vec::new(),
             state: ProcessState::Running,
             address_space,
+            heap,
             fd_table,
             main_task,
             orphaned: false,
@@ -208,6 +272,10 @@ impl ProcessTable {
 
     pub fn address_space(&self, pid: ProcessId) -> Option<&AddressSpace> {
         Some(self.get(pid)?.address_space())
+    }
+
+    pub fn heap(&self, pid: ProcessId) -> Option<UserHeap> {
+        Some(self.get(pid)?.heap())
     }
 
     pub fn fd_table(&self, pid: ProcessId) -> Option<&FdTable> {
@@ -312,4 +380,8 @@ pub fn wait_status_address(address: u64) -> Option<VirtAddr> {
     } else {
         Some(VirtAddr::new(address))
     }
+}
+
+fn is_page_aligned(address: VirtAddr) -> bool {
+    address.as_u64() & 0xfff == 0
 }

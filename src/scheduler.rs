@@ -96,7 +96,7 @@ impl Scheduler {
             .map_err(|error| SpawnError::Process(ProcessError::File(error)))?;
         let pid = self
             .processes
-            .create(parent, init.address_space, fd_table, id)
+            .create(parent, init.address_space, init.heap, fd_table, id)
             .map_err(SpawnError::Process)?;
         self.tasks.push(Task::new_user(
             id,
@@ -589,6 +589,56 @@ impl Scheduler {
         Ok(0)
     }
 
+    fn sys_brk_current(&mut self, requested: u64) -> crate::syscall::SysResult {
+        let pid = self
+            .current_process_id()
+            .ok_or(crate::syscall::SysError::Invalid)?;
+        let process = self
+            .processes
+            .get_mut(pid)
+            .ok_or(crate::syscall::SysError::Invalid)?;
+        let heap = process.heap();
+
+        if requested == 0 {
+            return virt_to_sys_value(heap.brk());
+        }
+
+        if requested < heap.start().as_u64() {
+            return Err(crate::syscall::SysError::Invalid);
+        }
+
+        if requested > heap.limit().as_u64() {
+            return Err(crate::syscall::SysError::NoMemory);
+        }
+
+        let requested_addr = VirtAddr::new(requested);
+        if requested_addr == heap.brk() {
+            return virt_to_sys_value(heap.brk());
+        }
+
+        let new_mapped_end = align_up(requested, 4096)
+            .map(VirtAddr::new)
+            .ok_or(crate::syscall::SysError::Invalid)?;
+
+        if requested_addr.as_u64() > heap.brk().as_u64() {
+            if new_mapped_end.as_u64() > heap.mapped_end().as_u64() {
+                process
+                    .address_space_mut()
+                    .map_user_heap_pages(heap.mapped_end(), new_mapped_end)
+                    .map_err(map_heap_growth_error)?;
+            }
+        } else if new_mapped_end.as_u64() < heap.mapped_end().as_u64() {
+            process
+                .address_space_mut()
+                .unmap_user_heap_pages(new_mapped_end, heap.mapped_end())
+                .map_err(|_| crate::syscall::SysError::Invalid)?;
+        }
+
+        process.heap_mut().set_break(requested_addr, new_mapped_end);
+
+        virt_to_sys_value(requested_addr)
+    }
+
     fn current_process_id(&self) -> Option<ProcessId> {
         let current = self.current?;
         self.tasks[current].process_id()
@@ -859,6 +909,40 @@ pub fn open_file_offset_for_fd(pid: ProcessId, fd: usize) -> Option<usize> {
     })
 }
 
+pub fn process_heap_start(pid: ProcessId) -> Option<VirtAddr> {
+    cpu_interrupts::without_interrupts(|| unsafe {
+        Some(scheduler_mut().processes.heap(pid)?.start())
+    })
+}
+
+pub fn process_program_break(pid: ProcessId) -> Option<VirtAddr> {
+    cpu_interrupts::without_interrupts(|| unsafe {
+        Some(scheduler_mut().processes.heap(pid)?.brk())
+    })
+}
+
+pub fn process_heap_mapped_end(pid: ProcessId) -> Option<VirtAddr> {
+    cpu_interrupts::without_interrupts(|| unsafe {
+        Some(scheduler_mut().processes.heap(pid)?.mapped_end())
+    })
+}
+
+pub fn process_heap_limit(pid: ProcessId) -> Option<VirtAddr> {
+    cpu_interrupts::without_interrupts(|| unsafe {
+        Some(scheduler_mut().processes.heap(pid)?.limit())
+    })
+}
+
+pub fn user_page_is_mapped(pid: ProcessId, address: VirtAddr) -> bool {
+    cpu_interrupts::without_interrupts(|| unsafe {
+        scheduler_mut()
+            .processes
+            .address_space(pid)
+            .map(|address_space| address_space.user_page_is_accessible(address))
+            .unwrap_or(false)
+    })
+}
+
 pub fn read_user_u64(task_id: TaskId, address: VirtAddr) -> Option<u64> {
     cpu_interrupts::without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
@@ -916,6 +1000,10 @@ pub(crate) fn sys_write(fd: usize, user_buf: VirtAddr, len: usize) -> crate::sys
 
 pub(crate) fn sys_close(fd: usize) -> crate::syscall::SysResult {
     unsafe { scheduler_mut().sys_close_current(fd) }
+}
+
+pub(crate) fn sys_brk(requested: u64) -> crate::syscall::SysResult {
+    unsafe { scheduler_mut().sys_brk_current(requested) }
 }
 
 pub(crate) fn run_current_task() -> ! {
@@ -1024,6 +1112,26 @@ fn map_file_error(error: FileError) -> crate::syscall::SysError {
 
 fn map_user_memory_error(_error: UserMemoryError) -> crate::syscall::SysError {
     crate::syscall::SysError::Fault
+}
+
+fn map_heap_growth_error(
+    error: crate::address_space::AddressSpaceError,
+) -> crate::syscall::SysError {
+    match error {
+        crate::address_space::AddressSpaceError::FrameAllocationFailed
+        | crate::address_space::AddressSpaceError::MapTo(_) => crate::syscall::SysError::NoMemory,
+        crate::address_space::AddressSpaceError::KernelUserSlotInUse
+        | crate::address_space::AddressSpaceError::RangeOverflow
+        | crate::address_space::AddressSpaceError::Unmap(_) => crate::syscall::SysError::Invalid,
+    }
+}
+
+fn virt_to_sys_value(address: VirtAddr) -> crate::syscall::SysResult {
+    usize::try_from(address.as_u64()).map_err(|_| crate::syscall::SysError::Invalid)
+}
+
+fn align_up(value: u64, align: u64) -> Option<u64> {
+    Some(value.checked_add(align - 1)? & !(align - 1))
 }
 
 unsafe fn scheduler_mut() -> &'static mut Scheduler {

@@ -4,7 +4,8 @@ use x86_64::VirtAddr;
 
 use crate::address_space::{AddressSpace, AddressSpaceError, UserCopyError, UserMapFlags};
 use crate::user::{
-    map_user_stack, UserTaskInit, USER_ELF_LOAD_END, USER_ELF_LOAD_START, USER_STACK_TOP,
+    heap_for_loaded_image, map_user_stack, UserTaskInit, USER_ELF_LOAD_END, USER_ELF_LOAD_START,
+    USER_STACK_TOP,
 };
 
 const PAGE_SIZE: u64 = 4096;
@@ -40,6 +41,7 @@ pub enum ElfLoadError {
     SegmentOverlap,
     UnalignedSegment,
     EntryNotExecutable,
+    NoHeapRange,
     OutOfFrames,
     MapFailed,
     UserCopyFailed,
@@ -62,6 +64,8 @@ struct LoadSegment<'a> {
 
 pub fn load_user_elf(elf_bytes: &'static [u8], arg0: u64) -> Result<UserTaskInit, ElfLoadError> {
     let elf = parse_elf(elf_bytes)?;
+    let heap =
+        heap_for_loaded_image(elf.max_segment_end()).map_err(|_| ElfLoadError::NoHeapRange)?;
     let mut address_space = AddressSpace::new_user().map_err(map_address_space_error)?;
 
     for segment in &elf.segments {
@@ -93,6 +97,7 @@ pub fn load_user_elf(elf_bytes: &'static [u8], arg0: u64) -> Result<UserTaskInit
         address_space,
         entry_point: VirtAddr::new(elf.entry),
         user_stack_top: VirtAddr::new(USER_STACK_TOP),
+        heap,
         arg0,
     })
 }
@@ -268,6 +273,20 @@ impl LoadSegment<'_> {
     fn contains_entry(&self, entry: u64) -> bool {
         self.flags & PF_X != 0 && entry >= self.vaddr && entry < self.vaddr + self.memsz
     }
+
+    fn segment_end(&self) -> u64 {
+        self.vaddr + self.memsz
+    }
+}
+
+impl ParsedElf<'_> {
+    fn max_segment_end(&self) -> u64 {
+        self.segments
+            .iter()
+            .map(LoadSegment::segment_end)
+            .max()
+            .expect("parsed ELF has at least one load segment")
+    }
 }
 
 fn map_address_space_error(error: AddressSpaceError) -> ElfLoadError {
@@ -275,7 +294,8 @@ fn map_address_space_error(error: AddressSpaceError) -> ElfLoadError {
         AddressSpaceError::FrameAllocationFailed => ElfLoadError::OutOfFrames,
         AddressSpaceError::KernelUserSlotInUse
         | AddressSpaceError::RangeOverflow
-        | AddressSpaceError::MapTo(_) => ElfLoadError::MapFailed,
+        | AddressSpaceError::MapTo(_)
+        | AddressSpaceError::Unmap(_) => ElfLoadError::MapFailed,
     }
 }
 

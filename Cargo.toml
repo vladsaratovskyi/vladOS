@@ -76,6 +76,10 @@ harness = false
 name = "file_descriptors"
 harness = false
 
+[[test]]
+name = "user_heap"
+harness = false
+
 [profile.dev]
 panic = "abort"
 

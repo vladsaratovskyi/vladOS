@@ -39,14 +39,15 @@ The syscall entry path is still `int 0x80`:
 | `rax = 5` | `open` |
 | `rax = 6` | `read` |
 | `rax = 7` | `close` |
+| `rax = 8` | `brk` |
 | `rdi` | first syscall argument, such as fd or path pointer |
 | `rsi` | second syscall argument, such as user buffer pointer or path length |
 | `rdx` | third syscall argument, such as byte length, flags, or wait options |
 | `rax` on return | non-negative success value or negative errno-like error |
 
 The errno-like values are deliberately small: `ENOENT`, `EBADF`, `ECHILD`,
-`EFAULT`, `EINVAL`, `ENFILE`, `EMFILE`, `ENAMETOOLONG`, and `ENOSYS`. Unknown
-syscalls return `-ENOSYS`.
+`ENOMEM`, `EFAULT`, `EINVAL`, `ENFILE`, `EMFILE`, `ENAMETOOLONG`, and
+`ENOSYS`. Unknown syscalls return `-ENOSYS`.
 
 ## Checked User Memory
 
@@ -134,7 +135,7 @@ Deferred intentionally:
 - `lseek`, `dup`, pipes, sockets, and fd inheritance
 - blocking I/O
 - `fork` and copy-on-write
-- demand paging, `brk`, and `mmap`
+- demand paging and `mmap`
 - dynamic linking
 - argv/envp
 - NX, SMAP, and SMEP

@@ -1,6 +1,7 @@
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::{
-    mapper::MapToError, Mapper, OffsetPageTable, Page, PageTableFlags, PhysFrame, Size4KiB,
+    mapper::{MapToError, UnmapError},
+    Mapper, OffsetPageTable, Page, PageTableFlags, PhysFrame, Size4KiB,
 };
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -15,6 +16,7 @@ pub enum AddressSpaceError {
     KernelUserSlotInUse,
     RangeOverflow,
     MapTo(MapToError<Size4KiB>),
+    Unmap(UnmapError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,13 +178,58 @@ impl AddressSpace {
         Ok(())
     }
 
+    pub fn map_user_heap_pages(
+        &mut self,
+        start: VirtAddr,
+        end: VirtAddr,
+    ) -> Result<(), AddressSpaceError> {
+        validate_page_range(start, end)?;
+
+        let mut address = start.as_u64();
+        let end = end.as_u64();
+        while address < end {
+            if let Err(error) = self.map_zeroed_user_page(
+                VirtAddr::new(address),
+                UserMapFlags::read_write().page_table_flags(),
+            ) {
+                let _ = self.unmap_user_heap_pages(start, VirtAddr::new(address));
+                return Err(error);
+            }
+
+            address = address
+                .checked_add(PAGE_SIZE)
+                .ok_or(AddressSpaceError::RangeOverflow)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn unmap_user_heap_pages(
+        &mut self,
+        start: VirtAddr,
+        end: VirtAddr,
+    ) -> Result<(), AddressSpaceError> {
+        validate_page_range(start, end)?;
+
+        let mut address = start.as_u64();
+        let end = end.as_u64();
+        while address < end {
+            self.unmap_page(VirtAddr::new(address))?;
+            address = address
+                .checked_add(PAGE_SIZE)
+                .ok_or(AddressSpaceError::RangeOverflow)?;
+        }
+
+        Ok(())
+    }
+
     pub fn map_frame(
         &mut self,
         address: VirtAddr,
         frame: PhysFrame<Size4KiB>,
         flags: PageTableFlags,
     ) -> Result<(), AddressSpaceError> {
-        let page = Page::containing_address(address);
+        let page = Page::<Size4KiB>::containing_address(address);
 
         memory::with_state(|state| {
             let physical_memory_offset = state.physical_memory_offset();
@@ -195,6 +242,24 @@ impl AddressSpace {
                     .map_err(AddressSpaceError::MapTo)?
                     .flush();
             }
+
+            Ok(())
+        })
+    }
+
+    fn unmap_page(&mut self, address: VirtAddr) -> Result<(), AddressSpaceError> {
+        let page = Page::<Size4KiB>::containing_address(address);
+
+        memory::with_state(|state| {
+            let physical_memory_offset = state.physical_memory_offset();
+            let level_4_table = unsafe { state.page_table_mut(self.level_4_frame) };
+            let mut mapper = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
+
+            mapper
+                .unmap(page)
+                .map_err(AddressSpaceError::Unmap)?
+                .1
+                .flush();
 
             Ok(())
         })
@@ -335,6 +400,17 @@ impl AddressSpace {
 
 fn entry_allows_user(flags: PageTableFlags) -> bool {
     flags.contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
+}
+
+fn validate_page_range(start: VirtAddr, end: VirtAddr) -> Result<(), AddressSpaceError> {
+    let start = start.as_u64();
+    let end = end.as_u64();
+
+    if start > end || start & (PAGE_SIZE - 1) != 0 || end & (PAGE_SIZE - 1) != 0 {
+        return Err(AddressSpaceError::RangeOverflow);
+    }
+
+    Ok(())
 }
 
 fn align_down(value: u64, align: u64) -> u64 {
